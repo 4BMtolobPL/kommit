@@ -12,23 +12,21 @@ You are an expert developer.
 
 Write a concise Git commit message based on the diff below.
 
-{}
-
 Language: {}
+
+{}
 
 Diff:
 {}
 "#,
-        commit_guidelines(), lang, diff
+        commit_guidelines(),
+        lang,
+        diff
     )
 }
 
 fn commit_guidelines() -> &'static str {
     r#"
-You are an expert developer.
-
-Write a Git commit message based on the provided diff.
-
 Follow these rules strictly:
 
 [Format]
