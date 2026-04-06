@@ -7,6 +7,7 @@ use crate::git::get_diff;
 use crate::ollama::generate;
 use crate::prompt::build_prompt;
 use clap::Parser;
+use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[tokio::main]
@@ -14,6 +15,7 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let args = cli::Args::parse();
+    info!(?args, "Parsed arguments");
 
     let diff = get_diff(args.staged)?;
     let prompt = build_prompt(&diff, &args.lang);
@@ -25,14 +27,6 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    /*// a builder for `FmtSubscriber`.
-    let subscriber = FmtSubscriber::builder()
-        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
-        // will be written to stdout.
-        .with_max_level(Level::TRACE)
-        // completes the builder.
-        .finish();*/
-
     let subscriber = fmt()
         .json()
         .with_env_filter(EnvFilter::from_default_env())

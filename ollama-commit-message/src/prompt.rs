@@ -1,7 +1,7 @@
 use tracing::info;
 
 pub(crate) fn build_prompt(diff: &str, lang: &str) -> String {
-    info!("Building prompt");
+    info!(%lang, "Building prompt");
     // TODO: diff 요약 먼저 시키기 (2-step)
     // TODO: 파일별 그룹
     // TODO: 프롬프트 버전 관리
@@ -12,12 +12,11 @@ You are an expert developer.
 
 Write a concise Git commit message based on the diff below.
 
-Language: {}
-
-{}
+{0}
+- Language: {1}
 
 Diff:
-{}
+{2}
 "#,
         commit_guidelines(),
         lang,

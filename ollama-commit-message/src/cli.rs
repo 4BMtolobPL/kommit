@@ -7,7 +7,7 @@ pub(crate) struct Args {
     pub(crate) staged: bool,
 
     /// Name of the model
-    #[arg(short, long, default_value = "qwen3.5")]
+    #[arg(short, long, default_value = "gemma4")]
     pub(crate) model: String,
 
     /// en|ko
