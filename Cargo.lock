@@ -653,6 +653,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kommit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "ollama-rs",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -747,19 +760,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys",
-]
-
-[[package]]
-name = "ollama-commit-message"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "futures",
- "ollama-rs",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

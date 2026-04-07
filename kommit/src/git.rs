@@ -5,6 +5,7 @@ pub(crate) fn get_diff(staged: bool) -> anyhow::Result<String> {
     info!(%staged, "Getting diff");
     // TODO: diff 너무 길명 truncate 필요
     // TODO: binary 파일 제외
+    // TODO: output이 비어있을때 처리
 
     let output = if staged {
         Command::new("git").args(["diff", "--staged"]).output()?
