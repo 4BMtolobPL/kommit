@@ -1,3 +1,5 @@
+use crate::prompt::ResponseLang;
+use crate::provider::LlmProvider;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -10,7 +12,10 @@ pub(crate) struct Args {
     #[arg(short, long, default_value = "gemma4")]
     pub(crate) model: String,
 
-    /// en|ko
-    #[arg(long, default_value = "en")]
-    pub(crate) lang: String,
+    /// Language to writing commit messages
+    #[arg(long, default_value_t = ResponseLang::En)]
+    pub(crate) lang: ResponseLang,
+
+    #[arg(long, default_value_t = LlmProvider::Ollama)]
+    pub(crate) provider: LlmProvider,
 }
