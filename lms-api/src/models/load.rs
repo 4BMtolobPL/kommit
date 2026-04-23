@@ -1,6 +1,6 @@
 use crate::LmStudio;
 use crate::error::ApiError;
-use crate::models::types::{LoadStatus, ModelType};
+use crate::types::{LoadStatus, ModelType};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 

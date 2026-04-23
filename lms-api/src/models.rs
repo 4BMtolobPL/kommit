@@ -1,14 +1,13 @@
 pub mod download;
 pub mod download_status;
 pub mod load;
-pub mod types;
 pub mod unload;
 
 use crate::LmStudio;
 use crate::error::ApiError;
 use serde::Deserialize;
 use tracing::{info, instrument};
-use types::ModelType;
+use crate::types::{AllowedOptions, ModelFileFormat, ModelType};
 
 impl LmStudio {
     #[instrument(skip(self))]
@@ -77,16 +76,6 @@ pub struct Config {
 }
 
 #[derive(Deserialize, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelFileFormat {
-    Gguf,
-    Mlx,
-
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Deserialize, Debug)]
 pub struct Capability {
     pub vision: bool,
     pub trained_for_tool_use: bool,
@@ -97,17 +86,4 @@ pub struct Capability {
 pub struct Reasoning {
     pub allowed_options: Vec<AllowedOptions>,
     pub default: AllowedOptions,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum AllowedOptions {
-    Off,
-    On,
-    Low,
-    Medium,
-    High,
-
-    #[serde(other)]
-    Unknown,
 }
