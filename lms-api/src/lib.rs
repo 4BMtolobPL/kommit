@@ -1,10 +1,9 @@
+pub mod chat;
 pub mod error;
 pub mod models;
-pub mod chat;
 pub mod types;
 
 use reqwest::{Client, IntoUrl, Url};
-use std::time::Duration;
 
 pub struct LmStudio {
     url: Url,
@@ -31,7 +30,7 @@ impl LmStudio {
 impl Default for LmStudio {
     fn default() -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            // .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
 
