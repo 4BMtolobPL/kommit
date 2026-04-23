@@ -1,6 +1,8 @@
+use clap::ValueEnum;
+use std::fmt::{Display, Formatter};
 use tracing::info;
 
-pub(crate) fn build_prompt(diff: &str, lang: &str) -> String {
+pub(crate) fn build_prompt(diff: &str, lang: ResponseLang) -> String {
     info!(%lang, "Building prompt");
     // TODO: diff 요약 먼저 시키기 (2-step)
     // TODO: 파일별 그룹
@@ -52,4 +54,16 @@ Follow these rules strictly:
 [Output Rules]
 - Output ONLY the commit message
 "#
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub(crate) enum ResponseLang {
+    Ko,
+    En,
+}
+
+impl Display for ResponseLang {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_possible_value().unwrap().get_name())
+    }
 }

@@ -1,11 +1,11 @@
 pub mod cli;
 pub mod git;
-pub mod ollama;
 pub mod prompt;
+pub mod provider;
 
 use crate::git::get_diff;
-use crate::ollama::generate;
 use crate::prompt::build_prompt;
+use crate::provider::create_client;
 use clap::Parser;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -17,9 +17,11 @@ async fn main() -> anyhow::Result<()> {
     let args = cli::Args::parse();
     info!(?args, "Parsed arguments");
 
+    let client = create_client(args.provider);
+
     let diff = get_diff(args.staged)?;
-    let prompt = build_prompt(&diff, &args.lang);
-    let message = generate(&args.model, &prompt).await?;
+    let prompt = build_prompt(&diff, args.lang);
+    let message = client.generate(&args.model, &prompt).await?;
 
     println!("{message}");
 
@@ -28,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
 
 fn init_tracing() {
     let subscriber = fmt()
-        .json()
         .with_env_filter(EnvFilter::from_default_env())
+        .pretty()
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
