@@ -1,23 +1,15 @@
 use crate::LmStudio;
 use crate::error::ApiError;
-use crate::types::DownloadStatus;
-use serde::{Deserialize, Serialize};
+use crate::models::download::request::DownloadRequest;
+use crate::models::download::response::DownloadResponse;
 use tracing::{error, info, instrument};
 
 impl LmStudio {
     #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models/download"))]
-    pub async fn download(
-        &self,
-        model: &str,
-        quantization: Option<&str>,
-    ) -> Result<DownloadResponse, ApiError> {
+    pub async fn download(&self, request: DownloadRequest) -> Result<DownloadResponse, ApiError> {
         info!("Download LLMs and embedding models");
 
         let url = format!("{}api/v1/models/download", self.url);
-        let request = DownloadRequest {
-            model: model.to_string(),
-            quantization: quantization.map(|x| x.to_string()),
-        };
         let res = self.client.post(&url).json(&request).send().await?;
 
         let status = res.status();
@@ -32,23 +24,30 @@ impl LmStudio {
         Ok(response)
     }
 }
-#[derive(Serialize)]
-struct DownloadRequest {
-    model: String,
-    quantization: Option<String>,
+
+pub mod request {
+    use derive_builder::Builder;
+    use serde::Serialize;
+
+    #[derive(Serialize, Debug, Builder)]
+    #[builder(setter(into, strip_option))]
+    pub struct DownloadRequest {
+        model: String,
+        #[builder(default)]
+        quantization: Option<String>,
+    }
 }
 
-#[derive(Deserialize, Debug)]
-pub struct DownloadResponse {
-    pub job_id: Option<String>,
-    pub status: DownloadStatus,
-    pub completed_at: Option<String>,
-    pub total_size_bytes: Option<u64>,
-    pub started_at: Option<String>,
-}
+pub mod response {
+    use crate::types::DownloadStatus;
+    use serde::Deserialize;
 
-impl DownloadResponse {
-    pub fn job_id(&self) -> Option<String> {
-        self.job_id.clone()
+    #[derive(Deserialize, Debug)]
+    pub struct DownloadResponse {
+        pub job_id: Option<String>,
+        pub status: DownloadStatus,
+        pub completed_at: Option<String>,
+        pub total_size_bytes: Option<u64>,
+        pub started_at: Option<String>,
     }
 }

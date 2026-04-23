@@ -11,7 +11,9 @@ use tracing::{error, info, instrument, warn};
 impl LmStudio {
     #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models"))]
     pub async fn models(&self) -> Result<Vec<Model>, ApiError> {
-        info!("Get a list of available models on your system, including both LLMs and embedding models.");
+        info!(
+            "Get a list of available models on your system, including both LLMs and embedding models."
+        );
 
         let url = format!("{}api/v1/models", self.url);
         let res = self.client.get(&url).send().await?;
@@ -29,7 +31,7 @@ impl LmStudio {
     }
 }
 
-mod response {
+pub mod response {
     use crate::types::{AllowedOptions, ModelFileFormat, ModelType};
     use serde::Deserialize;
 

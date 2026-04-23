@@ -53,7 +53,7 @@ pub enum LoadStatus {
     Unknown,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum AllowedOptions {
     Off,
