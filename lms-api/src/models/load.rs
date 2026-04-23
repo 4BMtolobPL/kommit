@@ -2,18 +2,23 @@ use crate::LmStudio;
 use crate::error::ApiError;
 use crate::types::{LoadStatus, ModelType};
 use serde::{Deserialize, Serialize};
-use tracing::instrument;
+use tracing::{error, info, instrument};
 
 impl LmStudio {
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models/load"))]
     pub async fn load(&self, model: &str) -> Result<LoadResponse, ApiError> {
+        info!("Load an LLM or Embedding model into memory with custom configuration for inference");
+        
         let url = format!("{}api/v1/models/load", self.url);
-
         let json = LoadRequest::new(model);
-        let res = self.client.post(url).json(&json).send().await?;
+        let res = self.client.post(&url).json(&json).send().await?;
 
-        if !res.status().is_success() {
-            return Err(ApiError::Status(res.status()));
+        let status = res.status();
+        if !status.is_success() {
+            error!(%url, "LM Studio request failed");
+
+            let body = res.text().await.unwrap_or_default();
+            return Err(ApiError::Status(status, body));
         }
 
         let response = res.json::<LoadResponse>().await?;

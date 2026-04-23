@@ -2,19 +2,25 @@ use crate::LmStudio;
 use crate::error::ApiError;
 use crate::types::DownloadStatus;
 use serde::Deserialize;
+use tracing::{error, info, instrument};
 
 impl LmStudio {
+    #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models/download/status/{job_id}"))]
     pub async fn download_status(&self, job_id: &str) -> Result<DownloadStatusResponse, ApiError> {
+        info!("Get the status of model downloads");
+        
         let url = format!("{}api/v1/models/download/status/{job_id}", self.url);
+        let res = self.client.get(&url).send().await?;
 
-        let res = self.client.get(url).send().await?;
+        let status = res.status();
+        if !status.is_success() {
+            error!(%url, "LM Studio request failed");
 
-        if !res.status().is_success() {
-            return Err(ApiError::Status(res.status()));
+            let body = res.text().await.unwrap_or_default();
+            return Err(ApiError::Status(status, body));
         }
 
         let response = res.json::<DownloadStatusResponse>().await?;
-
         Ok(response)
     }
 }

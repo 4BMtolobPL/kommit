@@ -2,24 +2,26 @@ use crate::LmStudio;
 use crate::chat::request::ChatRequest;
 use crate::chat::response::ChatResponse;
 use crate::error::ApiError;
-use tracing::info;
+use tracing::{error, info, instrument};
 
 impl LmStudio {
+    #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/chat"))]
     pub async fn chat(&self, model: &str, input: &str) -> Result<ChatResponse, ApiError> {
-        info!("Send a message to model");
+        info!("Send a message to a model and receive a response. Supports MCP integration.");
 
         let url = format!("{}api/v1/chat", self.url);
-
         let json = ChatRequest::new(model, input);
+        let res = self.client.post(&url).json(&json).send().await?;
 
-        let res = self.client.post(url).json(&json).send().await?;
+        let status = res.status();
+        if !status.is_success() {
+            error!(%url, "LM Studio request failed");
 
-        if !res.status().is_success() {
-            return Err(ApiError::Status(res.status()));
+            let body = res.text().await.unwrap_or_default();
+            return Err(ApiError::Status(status, body));
         }
 
         let response = res.json::<ChatResponse>().await?;
-
         Ok(response)
     }
 }

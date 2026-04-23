@@ -2,30 +2,33 @@ use crate::LmStudio;
 use crate::error::ApiError;
 use crate::types::DownloadStatus;
 use serde::{Deserialize, Serialize};
-use tracing::instrument;
+use tracing::{error, info, instrument};
 
 impl LmStudio {
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models/download"))]
     pub async fn download(
         &self,
         model: &str,
         quantization: Option<&str>,
     ) -> Result<DownloadResponse, ApiError> {
-        let url = format!("{}api/v1/models/download", self.url);
+        info!("Download LLMs and embedding models");
 
+        let url = format!("{}api/v1/models/download", self.url);
         let request = DownloadRequest {
             model: model.to_string(),
             quantization: quantization.map(|x| x.to_string()),
         };
+        let res = self.client.post(&url).json(&request).send().await?;
 
-        let res = self.client.post(url).json(&request).send().await?;
+        let status = res.status();
+        if !status.is_success() {
+            error!(%url, "LM Studio request failed");
 
-        if !res.status().is_success() {
-            return Err(ApiError::Status(res.status()));
+            let body = res.text().await.unwrap_or_default();
+            return Err(ApiError::Status(status, body));
         }
 
         let response = res.json::<DownloadResponse>().await?;
-
         Ok(response)
     }
 }
