@@ -5,9 +5,9 @@ pub mod unload;
 
 use crate::LmStudio;
 use crate::error::ApiError;
+use crate::types::{AllowedOptions, ModelFileFormat, ModelType};
 use serde::Deserialize;
 use tracing::{info, instrument};
-use crate::types::{AllowedOptions, ModelFileFormat, ModelType};
 
 impl LmStudio {
     #[instrument(skip(self))]

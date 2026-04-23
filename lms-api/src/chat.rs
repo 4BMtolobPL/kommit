@@ -1,8 +1,8 @@
-use tracing::info;
-use crate::chat::request::{ChatRequest, Input};
+use crate::LmStudio;
+use crate::chat::request::ChatRequest;
 use crate::chat::response::ChatResponse;
 use crate::error::ApiError;
-use crate::LmStudio;
+use tracing::info;
 
 impl LmStudio {
     pub async fn chat(&self, model: &str, input: &str) -> Result<ChatResponse, ApiError> {
@@ -33,18 +33,31 @@ mod request {
     pub struct ChatRequest {
         model: String,
         input: Input,
+        #[serde(skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         integrations: Option<Integration>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         stream: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         temperature: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         top_p: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         top_k: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         min_p: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         repeat_penalty: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         max_output_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<AllowedOptions>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         context_length: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         store: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         previous_response_id: Option<String>,
     }
 
@@ -71,6 +84,7 @@ mod request {
     }
 
     #[derive(Serialize)]
+    #[serde(untagged)]
     pub(super) enum Input {
         InputText(String),
         InputObject(InputObject),
@@ -78,17 +92,13 @@ mod request {
 
     #[derive(Serialize)]
     #[serde(tag = "type")]
-    enum InputObject {
-        Message {
-            content: String,
-        },
-        Image {
-            data_url: String,
-        }
+    pub(super) enum InputObject {
+        Message { content: String },
+        Image { data_url: String },
     }
 
-
     #[derive(Serialize)]
+    #[serde(untagged)]
     enum Integration {
         PluginId(String),
         Integration(Tagged),
@@ -106,25 +116,32 @@ mod request {
             server_url: String,
             allowed_tools: Option<Vec<String>>,
             headers: Option<HashMap<String, String>>,
-        }
+        },
     }
 }
 
-mod response {
+pub mod response {
     use serde::Deserialize;
     use std::collections::HashMap;
 
-    #[derive(Deserialize)]
+    #[derive(Deserialize, Debug)]
     pub struct ChatResponse {
-        model_instance_id: String,
-        output: Vec<Output>,
-        stats: Stats,
-        response_id: Option<String>,
+        pub model_instance_id: String,
+        pub output: Vec<Output>,
+        pub stats: Stats,
+        pub response_id: Option<String>,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Deserialize, Debug)]
+    #[serde(tag = "type")]
+    pub enum ProviderInfo {
+        Plugin { plugin_id: String },
+        EphemeralMcp { server_label: String },
+    }
+
+    #[derive(Deserialize, Debug)]
     #[serde(tag = "type", rename_all = "snake_case")]
-    enum Output {
+    pub enum Output {
         Message {
             content: String,
         },
@@ -139,41 +156,30 @@ mod response {
         },
         InvalidToolCall {
             reason: String,
-            metadata: Metadata
+            metadata: Metadata,
         },
     }
 
-    #[derive(Deserialize)]
+    #[derive(Deserialize, Debug)]
     #[serde(tag = "type")]
-    enum ProviderInfo {
-        Plugin {
-            plugin_id: String,
-        },
-        EphemeralMcp {
-            server_label: String,
-        }
-    }
-
-    #[derive(Deserialize)]
-    #[serde(tag = "type")]
-    enum Metadata {
+    pub enum Metadata {
         InvalidName {
             tool_name: String,
         },
         InvalidArguments {
             tool_name: String,
             arguments: HashMap<String, String>,
-            provider_info: ProviderInfo
-        }
+            provider_info: ProviderInfo,
+        },
     }
 
-    #[derive(Deserialize)]
-    struct Stats {
-        input_tokens : f64,
-        total_output_tokens : f64,
-        reasoning_output_tokens : f64,
-        tokens_per_second : f64,
-        time_to_first_token_seconds : f64,
-        model_load_time_seconds : Option<f64>
+    #[derive(Deserialize, Debug)]
+    pub struct Stats {
+        pub input_tokens: f64,
+        pub total_output_tokens: f64,
+        pub reasoning_output_tokens: f64,
+        pub tokens_per_second: f64,
+        pub time_to_first_token_seconds: f64,
+        pub model_load_time_seconds: Option<f64>,
     }
 }
