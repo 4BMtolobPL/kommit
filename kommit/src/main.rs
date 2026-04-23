@@ -30,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
 
 fn init_tracing() {
     let subscriber = fmt()
-        .json()
         .with_env_filter(EnvFilter::from_default_env())
+        .pretty()
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");

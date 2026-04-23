@@ -1,6 +1,9 @@
 use crate::provider::LlmClient;
+use anyhow::Context;
 use async_trait::async_trait;
 use lms_api::LmStudio;
+use lms_api::chat::response::Output;
+use std::fmt::Write;
 use tracing::{info, instrument, trace};
 
 pub(crate) struct LmStudioClient {}
@@ -20,8 +23,26 @@ impl LlmClient for LmStudioClient {
 
         let lms = LmStudio::default();
 
-        // TODO: let res = lms.chat()
+        let res = lms
+            .chat(model, prompt)
+            .await
+            .context("Failed to connect to LmStudio. Is it running?")?;
 
-        Ok("Dev".to_string())
+        let output = res.output;
+
+        let mut s = String::new();
+        for o in output {
+            match o {
+                Output::Message { content } => {
+                    write!(s, "{content}")?;
+                }
+                Output::Reasoning { content } => {
+                    info!(content = %content, "Reasoning");
+                }
+                Output::ToolCall { .. } | Output::InvalidToolCall { .. } => continue,
+            }
+        }
+
+        Ok(s)
     }
 }

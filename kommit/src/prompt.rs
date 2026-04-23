@@ -1,5 +1,5 @@
-use std::fmt::{Display, Formatter};
 use clap::ValueEnum;
+use std::fmt::{Display, Formatter};
 use tracing::info;
 
 pub(crate) fn build_prompt(diff: &str, lang: ResponseLang) -> String {
@@ -55,7 +55,6 @@ Follow these rules strictly:
 - Output ONLY the commit message
 "#
 }
-
 
 #[derive(Clone, Debug, ValueEnum)]
 pub(crate) enum ResponseLang {
