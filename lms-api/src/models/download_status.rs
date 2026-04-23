@@ -1,6 +1,6 @@
 use crate::LmStudio;
 use crate::error::ApiError;
-use crate::models::types::DownloadStatus;
+use crate::types::DownloadStatus;
 use serde::Deserialize;
 
 impl LmStudio {

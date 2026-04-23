@@ -1,5 +1,7 @@
 pub mod error;
 pub mod models;
+pub mod chat;
+pub mod types;
 
 use reqwest::{Client, IntoUrl, Url};
 use std::time::Duration;
