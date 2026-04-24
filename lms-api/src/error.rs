@@ -1,3 +1,4 @@
+use reqwest::StatusCode;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -6,5 +7,5 @@ pub enum ApiError {
     Request(#[from] reqwest::Error),
 
     #[error("unexpected status: {0}")]
-    Status(reqwest::StatusCode),
+    Status(StatusCode, String),
 }

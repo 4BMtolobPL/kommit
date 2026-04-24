@@ -1,110 +1,119 @@
 use crate::LmStudio;
-use crate::chat::request::ChatRequest;
+use crate::chat::request::{ChatRequest, ChatRequestBuilder};
 use crate::chat::response::ChatResponse;
 use crate::error::ApiError;
-use tracing::info;
+use tracing::{error, info, instrument};
 
 impl LmStudio {
-    pub async fn chat(&self, model: &str, input: &str) -> Result<ChatResponse, ApiError> {
-        info!("Send a message to model");
+    #[instrument(skip(self, request), fields(url = %self.url, endpoint = "/api/v1/chat", model = request.model))]
+    pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ApiError> {
+        info!("Send a message to a model and receive a response. Supports MCP integration.");
 
         let url = format!("{}api/v1/chat", self.url);
+        let res = self.client.post(&url).json(&request).send().await?;
 
-        let json = ChatRequest::new(model, input);
+        let status = res.status();
+        if !status.is_success() {
+            error!(%url, "LM Studio request failed");
 
-        let res = self.client.post(url).json(&json).send().await?;
-
-        if !res.status().is_success() {
-            return Err(ApiError::Status(res.status()));
+            let body = res.text().await.unwrap_or_default();
+            return Err(ApiError::Status(status, body));
         }
 
         let response = res.json::<ChatResponse>().await?;
-
         Ok(response)
     }
 }
 
-mod request {
+pub mod request {
     use crate::types::AllowedOptions;
+    use derive_builder::Builder;
     use serde::Serialize;
     use std::collections::HashMap;
+    use std::str::FromStr;
 
-    #[derive(Serialize)]
+    #[derive(Serialize, Builder)]
+    #[builder(setter(into, strip_option))]
     pub struct ChatRequest {
-        model: String,
+        pub(super) model: String,
         input: Input,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         system_prompt: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         integrations: Option<Integration>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         stream: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         temperature: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         top_p: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         top_k: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         min_p: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         repeat_penalty: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         max_output_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         reasoning: Option<AllowedOptions>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         context_length: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         store: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
         previous_response_id: Option<String>,
     }
 
-    impl ChatRequest {
-        pub fn new(model: &str, input: &str) -> Self {
-            Self {
-                model: model.to_string(),
-                input: Input::InputText(input.to_string()),
-                system_prompt: None,
-                integrations: None,
-                stream: None,
-                temperature: None,
-                top_p: None,
-                top_k: None,
-                min_p: None,
-                repeat_penalty: None,
-                max_output_tokens: None,
-                reasoning: None,
-                context_length: None,
-                store: None,
-                previous_response_id: None,
-            }
-        }
-    }
-
-    #[derive(Serialize)]
+    #[derive(Serialize, Clone)]
     #[serde(untagged)]
-    pub(super) enum Input {
+    pub enum Input {
         InputText(String),
         InputObject(InputObject),
     }
 
-    #[derive(Serialize)]
+    impl FromStr for Input {
+        type Err = ();
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            Ok(Self::from(s))
+        }
+    }
+
+    impl From<&str> for Input {
+        fn from(value: &str) -> Self {
+            Self::InputText(value.to_string())
+        }
+    }
+
+    #[derive(Serialize, Clone)]
     #[serde(tag = "type")]
     pub(super) enum InputObject {
         Message { content: String },
         Image { data_url: String },
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, Clone)]
     #[serde(untagged)]
     enum Integration {
         PluginId(String),
         Integration(Tagged),
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, Clone)]
     #[serde(tag = "type", rename_all = "snake_case")]
     enum Tagged {
         Plugin {
