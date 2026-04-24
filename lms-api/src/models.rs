@@ -6,7 +6,7 @@ pub mod unload;
 use crate::LmStudio;
 use crate::error::ApiError;
 use crate::models::response::{Model, ModelsResponse};
-use tracing::{error, info, instrument, warn};
+use tracing::{info, instrument};
 
 impl LmStudio {
     #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models"))]
@@ -15,18 +15,10 @@ impl LmStudio {
             "Get a list of available models on your system, including both LLMs and embedding models."
         );
 
-        let url = format!("{}api/v1/models", self.url);
-        let res = self.client.get(&url).send().await?;
+        let url = self.endpoint("api/v1/models")?;
+        let res = self.client.get(url).send().await?;
 
-        let status = res.status();
-        if !status.is_success() {
-            error!(%url, "LM Studio request failed");
-
-            let body = res.text().await.unwrap_or_default();
-            return Err(ApiError::Status(status, body));
-        }
-
-        let models = res.json::<ModelsResponse>().await?;
+        let models = self.handle_response::<ModelsResponse>(res).await?;
         Ok(models.models)
     }
 }
