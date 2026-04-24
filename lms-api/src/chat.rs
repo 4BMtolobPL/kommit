@@ -1,27 +1,20 @@
+pub mod stream;
+
 use crate::LmStudio;
-use crate::chat::request::{ChatRequest, ChatRequestBuilder};
+use crate::chat::request::ChatRequest;
 use crate::chat::response::ChatResponse;
 use crate::error::ApiError;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
 impl LmStudio {
     #[instrument(skip(self, request), fields(url = %self.url, endpoint = "/api/v1/chat", model = request.model))]
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ApiError> {
         info!("Send a message to a model and receive a response. Supports MCP integration.");
 
-        let url = format!("{}api/v1/chat", self.url);
-        let res = self.client.post(&url).json(&request).send().await?;
+        let url = self.endpoint("api/v1/chat")?;
+        let res = self.client.post(url).json(&request).send().await?;
 
-        let status = res.status();
-        if !status.is_success() {
-            error!(%url, "LM Studio request failed");
-
-            let body = res.text().await.unwrap_or_default();
-            return Err(ApiError::Status(status, body));
-        }
-
-        let response = res.json::<ChatResponse>().await?;
-        Ok(response)
+        self.handle_response(res).await
     }
 }
 
@@ -44,7 +37,7 @@ pub mod request {
         #[builder(default)]
         integrations: Option<Integration>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[builder(default)]
+        #[builder(setter(skip), default)]
         stream: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[builder(default)]
@@ -78,6 +71,13 @@ pub mod request {
         previous_response_id: Option<String>,
     }
 
+    impl ChatRequest {
+        pub(super) fn with_stream(mut self, value: bool) -> Self {
+            self.stream = Some(value);
+            self
+        }
+    }
+
     #[derive(Serialize, Clone)]
     #[serde(untagged)]
     pub enum Input {
@@ -101,7 +101,7 @@ pub mod request {
 
     #[derive(Serialize, Clone)]
     #[serde(tag = "type")]
-    pub(super) enum InputObject {
+    pub enum InputObject {
         Message { content: String },
         Image { data_url: String },
     }
