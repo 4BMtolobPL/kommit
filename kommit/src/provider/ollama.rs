@@ -30,4 +30,8 @@ impl LlmClient for OllamaClient {
 
         Ok(res.response)
     }
+
+    async fn generate_stream(&self, model: &str, prompt: &str) -> anyhow::Result<String> {
+        todo!()
+    }
 }

@@ -22,6 +22,7 @@ impl Display for LlmProvider {
 #[async_trait]
 pub(crate) trait LlmClient {
     async fn generate(&self, model: &str, prompt: &str) -> anyhow::Result<String>;
+    async fn generate_stream(&self, model: &str, prompt: &str) -> anyhow::Result<String>;
 }
 
 pub(crate) fn create_client(provider: LlmProvider) -> Box<dyn LlmClient> {

@@ -18,4 +18,7 @@ pub(crate) struct Args {
 
     #[arg(long, default_value_t = LlmProvider::Ollama)]
     pub(crate) provider: LlmProvider,
+
+    #[arg(long)]
+    pub(crate) stream: bool,
 }

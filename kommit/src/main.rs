@@ -21,9 +21,14 @@ async fn main() -> anyhow::Result<()> {
 
     let diff = get_diff(args.staged)?;
     let prompt = build_prompt(&diff, args.lang);
-    let message = client.generate(&args.model, &prompt).await?;
 
-    println!("{message}");
+    if args.stream {
+        let message = client.generate_stream(&args.model, &prompt).await?;
+        println!("{message}");
+    } else {
+        let message = client.generate(&args.model, &prompt).await?;
+        println!("{message}");
+    }
 
     Ok(())
 }
