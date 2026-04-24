@@ -2,6 +2,7 @@ use crate::provider::LlmClient;
 use anyhow::Context;
 use async_trait::async_trait;
 use lms_api::LmStudio;
+use lms_api::chat::request::ChatRequestBuilder;
 use lms_api::chat::response::Output;
 use std::fmt::Write;
 use tracing::{info, instrument, trace};
@@ -24,7 +25,12 @@ impl LlmClient for LmStudioClient {
         let lms = LmStudio::default();
 
         let res = lms
-            .chat(model, prompt)
+            .chat(
+                ChatRequestBuilder::default()
+                    .model(model)
+                    .input(prompt)
+                    .build()?,
+            )
             .await
             .context("Failed to connect to LmStudio. Is it running?")?;
 
