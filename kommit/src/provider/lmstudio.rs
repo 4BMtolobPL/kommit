@@ -1,14 +1,14 @@
-use crate::provider::LlmClient;
+use crate::provider::{LlmClient, LlmStream, StreamResponse};
 use anyhow::Context;
+use async_stream::stream;
 use async_trait::async_trait;
-use futures::{StreamExt, pin_mut};
+use futures::StreamExt;
 use lms_api::LmStudio;
 use lms_api::chat::request::ChatRequestBuilder;
 use lms_api::chat::response::Output;
 use lms_api::chat::stream::response::StreamEvent;
 use owo_colors::OwoColorize;
 use std::fmt::Write;
-use tokio::io::AsyncWriteExt;
 use tracing::{info, instrument, trace};
 
 pub(crate) struct LmStudioClient {}
@@ -57,13 +57,13 @@ impl LlmClient for LmStudioClient {
     }
 
     #[instrument(skip(self, prompt))]
-    async fn generate_stream(&self, model: &str, prompt: &str) -> anyhow::Result<String> {
+    async fn generate_stream(&self, model: &str, prompt: &str) -> anyhow::Result<LlmStream> {
         info!("Generating message");
         trace!(prompt = prompt, "Generating commit message");
 
         let lms = LmStudio::default();
 
-        let stream = lms
+        let mut stream = lms
             .chat_stream(
                 ChatRequestBuilder::default()
                     .model(model)
@@ -73,36 +73,38 @@ impl LlmClient for LmStudioClient {
             .await
             .context("Failed to connect to LmStudio. Is it running?")?;
 
-        pin_mut!(stream);
+        let s = stream! {
+            while let Some(res) = stream.next().await {
+                let responses = match res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        yield Err(anyhow::anyhow!(e));
+                        continue;
+                    }
+                };
 
-        let mut stdout = tokio::io::stdout();
-        while let Some(res) = stream.next().await {
-            let responses = res.unwrap();
+                info!(stream_event = ?responses, "Stream");
 
-            info!(stream_event = ?responses, "Stream");
+                match responses {
+                    StreamEvent::ReasoningDelta { content } => {
+                        info!(content = %content, event = "reasoning.delta");
 
-            match responses {
-                StreamEvent::ReasoningDelta { content } => {
-                    info!(content = %content, event = "reasoning.delta");
+                        yield Ok(StreamResponse::Think(content.bright_black().to_string()));
+                    }
+                    StreamEvent::ReasoningEnd => {
 
-                    stdout
-                        .write_all(content.bright_black().to_string().as_bytes())
-                        .await?;
-                    stdout.flush().await?;
+                        yield Ok(StreamResponse::Think("\n\n\n".to_string()));
+                    }
+                    StreamEvent::MessageDelta { content } => {
+                        info!(content = %content, event = "message.delta");
+
+                        yield Ok(StreamResponse::Generate(content.to_string()));
+                    }
+                    _ => continue,
                 }
-                StreamEvent::ReasoningEnd => {
-                    stdout.write_all("\n\n\n".as_bytes()).await?;
-                    stdout.flush().await?;
-                }
-                StreamEvent::MessageDelta { content } => {
-                    info!(content = %content, event = "message.delta");
-                    stdout.write_all(content.as_bytes()).await?;
-                    stdout.flush().await?;
-                }
-                _ => continue,
             }
-        }
+        };
 
-        Ok("".to_string())
+        Ok(Box::pin(s))
     }
 }
