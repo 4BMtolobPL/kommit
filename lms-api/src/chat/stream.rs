@@ -3,8 +3,11 @@ use crate::chat::request::ChatRequest;
 use crate::chat::stream::response::StreamEvent;
 use crate::error::ApiError;
 use async_stream::stream;
+use std::pin::Pin;
 use tokio_stream::{Stream, StreamExt};
 use tracing::{debug, error, info, instrument};
+
+pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
 
 #[cfg(feature = "stream")]
 impl LmStudio {
@@ -12,7 +15,7 @@ impl LmStudio {
     pub async fn chat_stream(
         &self,
         request: ChatRequest,
-    ) -> Result<impl Stream<Item = Result<StreamEvent, ApiError>>, ApiError> {
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
         info!("Send a message to a model and receive a response. Supports MCP integration.");
 
         let url = self.endpoint("api/v1/chat")?;
@@ -72,7 +75,7 @@ impl LmStudio {
             }
         };
 
-        Ok(s)
+        Ok(Box::pin(s))
     }
 }
 

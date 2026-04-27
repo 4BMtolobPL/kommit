@@ -6,7 +6,7 @@ use url::Url;
 async fn test_models_list() {
     let mut server = Server::new_async().await;
     let url = server.url();
-    
+
     let _m = server.mock("GET", "/api/v1/models")
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -25,8 +25,9 @@ async fn test_models_list() {
 async fn test_error_handling() {
     let mut server = Server::new_async().await;
     let url = server.url();
-    
-    let _m = server.mock("GET", "/api/v1/models")
+
+    let _m = server
+        .mock("GET", "/api/v1/models")
         .with_status(500)
         .with_body("Internal Server Error")
         .create_async()
