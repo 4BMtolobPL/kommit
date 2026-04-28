@@ -8,6 +8,7 @@ use crate::prompt::build_prompt;
 use crate::provider::{StreamResponse, create_client};
 use clap::Parser;
 use futures::StreamExt;
+use owo_colors::OwoColorize;
 use std::io;
 use std::io::Write;
 use tracing::info;
@@ -26,12 +27,18 @@ async fn main() -> anyhow::Result<()> {
     let prompt = build_prompt(&diff, args.lang);
 
     if args.stream {
-        let mut stream = client.generate_stream(&args.model, &prompt).await?;
+        let mut stream = client
+            .generate_stream(&args.model, &prompt, args.think)
+            .await?;
 
         let mut out = io::stdout().lock();
         while let Some(res) = stream.next().await {
             match res? {
-                StreamResponse::Think(text) | StreamResponse::Generate(text) => {
+                StreamResponse::Think(text) => {
+                    out.write_all(text.bright_black().to_string().as_bytes())?;
+                    out.flush()?;
+                }
+                StreamResponse::Generate(text) => {
                     out.write_all(text.as_bytes())?;
                     out.flush()?;
                 }
@@ -39,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
         }
         writeln!(out)?;
     } else {
-        let message = client.generate(&args.model, &prompt).await?;
+        let message = client.generate(&args.model, &prompt, args.think).await?;
         println!("{message}");
     }
 

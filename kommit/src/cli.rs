@@ -1,5 +1,5 @@
 use crate::prompt::ResponseLang;
-use crate::provider::LlmProvider;
+use crate::provider::{LlmProvider, ThinkType};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -19,6 +19,9 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = LlmProvider::Ollama)]
     pub(crate) provider: LlmProvider,
 
-    #[arg(long)]
+    #[arg(short, long)]
     pub(crate) stream: bool,
+
+    #[arg(short, long)]
+    pub(crate) think: Option<ThinkType>,
 }
