@@ -1,4 +1,4 @@
-use crate::provider::{LlmClient, LlmStream, StreamResponse};
+use crate::provider::{LlmClient, LlmStream, StreamResponse, ThinkType};
 use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
@@ -17,27 +17,48 @@ impl OllamaClient {
 
 #[async_trait]
 impl LlmClient for OllamaClient {
-    #[instrument(skip(self, model, prompt))]
-    async fn generate(&self, model: &str, prompt: &str) -> anyhow::Result<String> {
-        info!(%model, "Generating message");
-        trace!(model = model, prompt = prompt, "Generating commit message");
-        // TODO: stream 지원 -> UX 개선 가능
+    #[instrument(skip(self, prompt))]
+    async fn generate(
+        &self,
+        model: &str,
+        prompt: &str,
+        think: Option<ThinkType>,
+    ) -> anyhow::Result<String> {
+        info!("Generating commit message");
+        trace!(prompt = prompt, "Generating commit message");
 
         let ollama = Ollama::default();
+        let mut request = GenerationRequest::new(model.to_string(), prompt);
+        if let Some(think_type) = think {
+            request = request.think(think_type);
+        }
 
         let res = ollama
-            .generate(GenerationRequest::new(model.to_string(), prompt))
+            .generate(request)
             .await
             .context("Failed to connect to Ollama. Is it running?")?;
 
         Ok(res.response)
     }
 
-    async fn generate_stream(&self, model: &str, prompt: &str) -> anyhow::Result<LlmStream> {
+    #[instrument(skip(self, prompt))]
+    async fn generate_stream(
+        &self,
+        model: &str,
+        prompt: &str,
+        think: Option<ThinkType>,
+    ) -> anyhow::Result<LlmStream> {
+        info!("Generating commit message stream");
+        trace!(prompt = prompt, "Generating commit message stream");
+
         let ollama = Ollama::default();
+        let mut request = GenerationRequest::new(model.to_string(), prompt);
+        if let Some(think_type) = think {
+            request = request.think(think_type);
+        }
 
         let stream = ollama
-            .generate_stream(GenerationRequest::new(model.to_string(), prompt))
+            .generate_stream(request)
             .await
             .context("Failed to connect to Ollama. Is it running?")?;
 
@@ -48,7 +69,11 @@ impl LlmClient for OllamaClient {
                 match res {
                     Ok(responses) => {
                         for res in responses {
-                            yield Ok(StreamResponse::Generate(res.response));
+                            if let Some(thinking) = res.thinking {
+                                yield Ok(StreamResponse::Think(thinking));
+                            } else {
+                                yield Ok(StreamResponse::Generate(res.response));
+                            }
                         }
                     }
                     Err(e) => yield Err(anyhow::anyhow!(e)),
@@ -57,5 +82,17 @@ impl LlmClient for OllamaClient {
         };
 
         Ok(Box::pin(s))
+    }
+}
+
+impl From<ThinkType> for ollama_rs::generation::parameters::ThinkType {
+    fn from(value: ThinkType) -> Self {
+        match value {
+            ThinkType::True => ollama_rs::generation::parameters::ThinkType::True,
+            ThinkType::False => ollama_rs::generation::parameters::ThinkType::False,
+            ThinkType::Low => ollama_rs::generation::parameters::ThinkType::Low,
+            ThinkType::Medium => ollama_rs::generation::parameters::ThinkType::Medium,
+            ThinkType::High => ollama_rs::generation::parameters::ThinkType::High,
+        }
     }
 }

@@ -1,4 +1,4 @@
-use crate::provider::{LlmClient, LlmStream, StreamResponse};
+use crate::provider::{LlmClient, LlmStream, StreamResponse, ThinkType};
 use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
@@ -7,7 +7,6 @@ use lms_api::LmStudio;
 use lms_api::chat::request::ChatRequestBuilder;
 use lms_api::chat::response::Output;
 use lms_api::chat::stream::response::StreamEvent;
-use owo_colors::OwoColorize;
 use std::fmt::Write;
 use tracing::{info, instrument, trace};
 
@@ -22,19 +21,23 @@ impl LmStudioClient {
 #[async_trait]
 impl LlmClient for LmStudioClient {
     #[instrument(skip(self, prompt))]
-    async fn generate(&self, model: &str, prompt: &str) -> anyhow::Result<String> {
-        info!("Generating message");
+    async fn generate(
+        &self,
+        model: &str,
+        prompt: &str,
+        think: Option<ThinkType>,
+    ) -> anyhow::Result<String> {
+        info!("Generating commit message");
         trace!(prompt = prompt, "Generating commit message");
 
         let lms = LmStudio::default();
+        let mut builder = ChatRequestBuilder::default();
+        if let Some(think_type) = think {
+            builder.reasoning(think_type);
+        }
 
         let res = lms
-            .chat(
-                ChatRequestBuilder::default()
-                    .model(model)
-                    .input(prompt)
-                    .build()?,
-            )
+            .chat(builder.model(model).input(prompt).build()?)
             .await
             .context("Failed to connect to LmStudio. Is it running?")?;
 
@@ -57,19 +60,23 @@ impl LlmClient for LmStudioClient {
     }
 
     #[instrument(skip(self, prompt))]
-    async fn generate_stream(&self, model: &str, prompt: &str) -> anyhow::Result<LlmStream> {
-        info!("Generating message");
+    async fn generate_stream(
+        &self,
+        model: &str,
+        prompt: &str,
+        think: Option<ThinkType>,
+    ) -> anyhow::Result<LlmStream> {
+        info!("Generating commit message");
         trace!(prompt = prompt, "Generating commit message");
 
         let lms = LmStudio::default();
+        let mut builder = ChatRequestBuilder::default();
+        if let Some(think_type) = think {
+            builder.reasoning(think_type);
+        }
 
         let mut stream = lms
-            .chat_stream(
-                ChatRequestBuilder::default()
-                    .model(model)
-                    .input(prompt)
-                    .build()?,
-            )
+            .chat_stream(builder.model(model).input(prompt).build()?)
             .await
             .context("Failed to connect to LmStudio. Is it running?")?;
 
@@ -89,7 +96,7 @@ impl LlmClient for LmStudioClient {
                     StreamEvent::ReasoningDelta { content } => {
                         info!(content = %content, event = "reasoning.delta");
 
-                        yield Ok(StreamResponse::Think(content.bright_black().to_string()));
+                        yield Ok(StreamResponse::Think(content));
                     }
                     StreamEvent::ReasoningEnd => {
 
@@ -98,7 +105,7 @@ impl LlmClient for LmStudioClient {
                     StreamEvent::MessageDelta { content } => {
                         info!(content = %content, event = "message.delta");
 
-                        yield Ok(StreamResponse::Generate(content.to_string()));
+                        yield Ok(StreamResponse::Generate(content));
                     }
                     _ => continue,
                 }
@@ -106,5 +113,17 @@ impl LlmClient for LmStudioClient {
         };
 
         Ok(Box::pin(s))
+    }
+}
+
+impl From<ThinkType> for lms_api::types::AllowedOptions {
+    fn from(value: ThinkType) -> Self {
+        match value {
+            ThinkType::True => lms_api::types::AllowedOptions::On,
+            ThinkType::False => lms_api::types::AllowedOptions::Off,
+            ThinkType::Low => lms_api::types::AllowedOptions::Low,
+            ThinkType::Medium => lms_api::types::AllowedOptions::Medium,
+            ThinkType::High => lms_api::types::AllowedOptions::High,
+        }
     }
 }
