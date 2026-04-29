@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use tracing::info;
 
@@ -56,7 +57,8 @@ Follow these rules strictly:
 "#
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum ResponseLang {
     Ko,
     En,

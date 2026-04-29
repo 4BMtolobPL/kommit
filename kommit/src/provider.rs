@@ -3,13 +3,15 @@ use crate::provider::ollama::OllamaClient;
 use async_trait::async_trait;
 use clap::ValueEnum;
 use futures::Stream;
+use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::pin::Pin;
 
 pub mod lmstudio;
 pub mod ollama;
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum LlmProvider {
     Ollama,
     LmStudio,
@@ -51,7 +53,8 @@ pub(crate) fn create_client(provider: LlmProvider) -> Box<dyn LlmClient> {
     }
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum ThinkType {
     True,
     False,

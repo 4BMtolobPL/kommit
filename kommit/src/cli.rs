@@ -1,27 +1,84 @@
 use crate::prompt::ResponseLang;
 use crate::provider::{LlmProvider, ThinkType};
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-pub(crate) struct Args {
+pub(crate) struct Cli {
+    #[command(subcommand)]
+    pub(crate) command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum Commands {
+    /// Generate a commit message based on diff
+    Run(RunArgs),
+    /// Manage configuration
+    Config(ConfigArgs),
+}
+
+#[derive(ClapArgs, Debug)]
+pub(crate) struct RunArgs {
+    /// Summarize only staged changes
     #[arg(long)]
     pub(crate) staged: bool,
 
     /// Name of the model
-    #[arg(short, long, default_value = "gemma4")]
-    pub(crate) model: String,
-
-    /// Language to writing commit messages
-    #[arg(long, default_value_t = ResponseLang::En)]
-    pub(crate) lang: ResponseLang,
-
-    #[arg(long, default_value_t = LlmProvider::Ollama)]
-    pub(crate) provider: LlmProvider,
-
     #[arg(short, long)]
-    pub(crate) stream: bool,
+    pub(crate) model: Option<String>,
 
-    #[arg(short, long)]
+    /// Language for writing commit messages
+    #[arg(long)]
+    pub(crate) lang: Option<ResponseLang>,
+
+    /// LLM provider
+    #[arg(long)]
+    pub(crate) provider: Option<LlmProvider>,
+
+    /// Enable or disable streaming response
+    #[arg(short, long, value_name = "BOOL")]
+    pub(crate) stream: Option<bool>,
+
+    /// Thinking type or level
+    #[arg(short, long, value_name = "TYPE")]
     pub(crate) think: Option<ThinkType>,
+}
+
+#[derive(ClapArgs, Debug)]
+pub(crate) struct ConfigArgs {
+    #[command(subcommand)]
+    pub(crate) command: ConfigSubcommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ConfigSubcommand {
+    /// Show the current configuration and path
+    Show,
+    /// Set a configuration value
+    Set {
+        #[command(subcommand)]
+        item: ConfigItem,
+    },
+    /// Open the configuration directory in the default file manager
+    Open,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ConfigItem {
+    Model {
+        value: String,
+    },
+    Lang {
+        value: ResponseLang,
+    },
+    Provider {
+        value: LlmProvider,
+    },
+    Stream {
+        #[arg(value_parser = ["true", "false"])]
+        value: String,
+    },
+    Think {
+        value: ThinkType,
+    },
 }
