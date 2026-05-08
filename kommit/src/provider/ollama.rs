@@ -1,4 +1,4 @@
-use crate::provider::{LlmClient, LlmStream, StreamResponse, ThinkType};
+use crate::provider::{LlmStream, ProviderStrategy, StreamResponse, ThinkType};
 use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
@@ -16,7 +16,7 @@ impl OllamaClient {
 }
 
 #[async_trait]
-impl LlmClient for OllamaClient {
+impl ProviderStrategy for OllamaClient {
     #[instrument(skip(self, prompt))]
     async fn generate(
         &self,

@@ -1,9 +1,9 @@
-use crate::provider::{LlmClient, LlmStream, StreamResponse, ThinkType};
+use crate::provider::{LlmStream, ProviderStrategy, StreamResponse, ThinkType};
 use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
-use lms_api::LmStudio;
+use lms_api::{LmStudio, models::load::request::LoadRequestBuilder};
 use lms_api::chat::request::ChatRequestBuilder;
 use lms_api::chat::response::Output;
 use lms_api::chat::stream::response::StreamEvent;
@@ -19,7 +19,7 @@ impl LmStudioClient {
 }
 
 #[async_trait]
-impl LlmClient for LmStudioClient {
+impl ProviderStrategy for LmStudioClient {
     #[instrument(skip(self, prompt))]
     async fn generate(
         &self,
