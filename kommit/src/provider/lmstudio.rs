@@ -10,11 +10,28 @@ use lms_api::chat::stream::response::StreamEvent;
 use std::fmt::Write;
 use tracing::{info, instrument, trace};
 
-pub(crate) struct LmStudioClient {}
+pub(crate) struct LmStudioClient {
+    lms: LmStudio,
+}
 
 impl LmStudioClient {
     pub(crate) fn new() -> Self {
-        Self {}
+        Self {
+            lms: LmStudio::default(),
+        }
+    }
+
+    async fn load_model(&self, model: &str) -> anyhow::Result<()> {
+        info!("Loading model: {model}");
+
+        let request = LoadRequestBuilder::default()
+            .model(model)
+            .build()
+            .context("failed to build load request")?;
+        self.lms.load(request)
+            .await
+            .context("failed to load model")?;
+        Ok(())
     }
 }
 
@@ -30,13 +47,14 @@ impl ProviderStrategy for LmStudioClient {
         info!("Generating commit message");
         trace!(prompt = prompt, "Generating commit message");
 
-        let lms = LmStudio::default();
+        self.load_model(model).await?;
+        
         let mut builder = ChatRequestBuilder::default();
         if let Some(think_type) = think {
             builder.reasoning(think_type);
         }
 
-        let res = lms
+        let res = self.lms
             .chat(builder.model(model).input(prompt).build()?)
             .await
             .context("Failed to connect to LmStudio. Is it running?")?;
