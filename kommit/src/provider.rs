@@ -31,7 +31,7 @@ pub(crate) enum StreamResponse {
 pub(crate) type LlmStream = Pin<Box<dyn Stream<Item = anyhow::Result<StreamResponse>> + Send>>;
 
 #[async_trait]
-pub(crate) trait LlmClient {
+pub(crate) trait ProviderStrategy {
     async fn generate(
         &self,
         model: &str,
@@ -46,7 +46,7 @@ pub(crate) trait LlmClient {
     ) -> anyhow::Result<LlmStream>;
 }
 
-pub(crate) fn create_client(provider: LlmProvider) -> Box<dyn LlmClient> {
+pub(crate) fn create_client(provider: LlmProvider) -> Box<dyn ProviderStrategy> {
     match provider {
         LlmProvider::Ollama => Box::new(OllamaClient::new()),
         LlmProvider::LmStudio => Box::new(LmStudioClient::new()),
