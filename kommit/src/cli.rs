@@ -42,6 +42,14 @@ pub(crate) struct RunArgs {
     /// Thinking type or level
     #[arg(short, long, value_name = "TYPE")]
     pub(crate) think: Option<ThinkType>,
+
+    /// Commit the changes after generating the message
+    #[arg(short, long)]
+    pub(crate) commit: bool,
+
+    /// Push the changes after committing
+    #[arg(short, long)]
+    pub(crate) push: bool,
 }
 
 #[derive(ClapArgs, Debug)]
