@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::git::{add_all, commit, get_diff, push};
 use crate::prompt::{ResponseLang, build_prompt};
 use crate::provider::{LlmProvider, StreamResponse, create_client};
+use anyhow::{anyhow, bail};
 use clap::Parser;
 use futures::StreamExt;
 use owo_colors::OwoColorize;
@@ -84,6 +85,12 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         write!(&mut buffer, "{}", message)?;
     }
 
+    if buffer.is_empty() {
+        bail!(
+            "There is no message. Please check to see if the response was interrupted due to a lack of context."
+        )
+    }
+
     if args.commit || args.push {
         // TODO: 여기에 커밋메세지 승인하는 기능 넣기
         if !args.staged {
@@ -125,7 +132,7 @@ fn config(args: ConfigArgs) -> anyhow::Result<()> {
                     config.stream = Some(
                         value
                             .parse::<bool>()
-                            .map_err(|_| anyhow::anyhow!("Invalid boolean value"))?,
+                            .map_err(|_| anyhow!("Invalid boolean value"))?,
                     );
                 }
                 ConfigItem::Think { value } => config.think = Some(value),
@@ -140,7 +147,7 @@ fn config(args: ConfigArgs) -> anyhow::Result<()> {
                 }
                 opener::open(dir)?;
             } else {
-                anyhow::bail!("Could not find config directory");
+                bail!("Could not find config directory");
             }
         }
     }

@@ -1,3 +1,4 @@
+use anyhow::bail;
 use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
@@ -7,7 +8,6 @@ pub(crate) fn get_diff(staged: bool) -> anyhow::Result<String> {
     info!(%staged, "Getting diff");
     // TODO: diff 너무 길면 truncate 필요
     // TODO: binary 파일 제외
-    // TODO: output이 비어있을때 처리
 
     let output = if staged {
         Command::new("git").args(["diff", "--staged"]).output()?
@@ -17,7 +17,12 @@ pub(crate) fn get_diff(staged: bool) -> anyhow::Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git diff failed: {}", stderr);
+        bail!("git diff failed: {}", stderr);
+    }
+
+    // output이 비어있을때 처리
+    if output.stdout.is_empty() {
+        bail!("git diff is empty");
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
