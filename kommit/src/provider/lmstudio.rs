@@ -3,10 +3,10 @@ use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
-use lms_api::{LmStudio, models::load::request::LoadRequestBuilder};
 use lms_api::chat::request::ChatRequestBuilder;
 use lms_api::chat::response::Output;
 use lms_api::chat::stream::response::StreamEvent;
+use lms_api::{LmStudio, models::load::request::LoadRequestBuilder};
 use std::fmt::Write;
 use tracing::{info, instrument, trace};
 
@@ -28,7 +28,8 @@ impl LmStudioClient {
             .model(model)
             .build()
             .context("failed to build load request")?;
-        self.lms.load(request)
+        self.lms
+            .load(request)
             .await
             .context("failed to load model")?;
         Ok(())
@@ -48,13 +49,14 @@ impl ProviderStrategy for LmStudioClient {
         trace!(prompt = prompt, "Generating commit message");
 
         self.load_model(model).await?;
-        
+
         let mut builder = ChatRequestBuilder::default();
         if let Some(think_type) = think {
             builder.reasoning(think_type);
         }
 
-        let res = self.lms
+        let res = self
+            .lms
             .chat(builder.model(model).input(prompt).build()?)
             .await
             .context("Failed to connect to LmStudio. Is it running?")?;

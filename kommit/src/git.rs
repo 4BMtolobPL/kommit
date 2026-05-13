@@ -1,9 +1,11 @@
+use std::io::Write;
 use std::process::Command;
+use tempfile::NamedTempFile;
 use tracing::info;
 
 pub(crate) fn get_diff(staged: bool) -> anyhow::Result<String> {
     info!(%staged, "Getting diff");
-    // TODO: diff 너무 길명 truncate 필요
+    // TODO: diff 너무 길면 truncate 필요
     // TODO: binary 파일 제외
     // TODO: output이 비어있을때 처리
 
@@ -19,4 +21,29 @@ pub(crate) fn get_diff(staged: bool) -> anyhow::Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub(crate) fn add_all() -> anyhow::Result<()> {
+    info!("Adding all changes");
+    Command::new("git").args(["add", "--all"]).status()?;
+    Ok(())
+}
+
+pub(crate) fn commit(message: &[u8]) -> anyhow::Result<()> {
+    info!(message = %String::from_utf8_lossy(message), "Committing with message");
+
+    let mut tmpfile = NamedTempFile::new()?;
+    tmpfile.write_all(message)?;
+
+    Command::new("git")
+        .args(["commit", "-F"])
+        .arg(tmpfile.path())
+        .status()?;
+    Ok(())
+}
+
+pub(crate) fn push() -> anyhow::Result<()> {
+    info!("Pushing");
+    Command::new("git").args(["push"]).status()?;
+    Ok(())
 }
