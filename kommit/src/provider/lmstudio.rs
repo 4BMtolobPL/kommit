@@ -9,16 +9,18 @@ use lms_api::chat::stream::response::StreamEvent;
 use lms_api::{LmStudio, models::load::request::LoadRequestBuilder};
 use std::fmt::Write;
 use tracing::{info, instrument, trace};
+use url::Url;
 
+#[derive(Default)]
 pub(crate) struct LmStudioClient {
     lms: LmStudio,
 }
 
 impl LmStudioClient {
-    pub(crate) fn new() -> Self {
-        Self {
-            lms: LmStudio::default(),
-        }
+    pub(crate) fn new(host: Url, port: u16) -> anyhow::Result<Self> {
+        Ok(Self {
+            lms: LmStudio::new(host, port)?,
+        })
     }
 
     async fn load_model(&self, model: &str) -> anyhow::Result<()> {

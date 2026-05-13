@@ -6,6 +6,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::pin::Pin;
+use url::Url;
 
 pub mod lmstudio;
 pub mod ollama;
@@ -15,6 +16,22 @@ pub mod ollama;
 pub(crate) enum LlmProvider {
     Ollama,
     LmStudio,
+}
+
+impl LlmProvider {
+    pub fn default_host(&self) -> Url {
+        match self {
+            LlmProvider::Ollama => Url::parse("http://localhost").unwrap(),
+            LlmProvider::LmStudio => Url::parse("http://localhost").unwrap(),
+        }
+    }
+
+    pub fn default_port(&self) -> u16 {
+        match self {
+            LlmProvider::Ollama => 11434,
+            LlmProvider::LmStudio => 1234,
+        }
+    }
 }
 
 impl Display for LlmProvider {
@@ -46,10 +63,14 @@ pub(crate) trait ProviderStrategy {
     ) -> anyhow::Result<LlmStream>;
 }
 
-pub(crate) fn create_client(provider: LlmProvider) -> Box<dyn ProviderStrategy> {
+pub(crate) fn create_client(
+    provider: LlmProvider,
+    host: Url,
+    port: u16,
+) -> anyhow::Result<Box<dyn ProviderStrategy>> {
     match provider {
-        LlmProvider::Ollama => Box::new(OllamaClient::new()),
-        LlmProvider::LmStudio => Box::new(LmStudioClient::new()),
+        LlmProvider::Ollama => Ok(Box::new(OllamaClient::new(host, port)?)),
+        LlmProvider::LmStudio => Ok(Box::new(LmStudioClient::new(host, port)?)),
     }
 }
 

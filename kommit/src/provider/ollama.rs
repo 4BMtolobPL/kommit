@@ -6,12 +6,18 @@ use futures::StreamExt;
 use ollama_rs::Ollama;
 use ollama_rs::generation::completion::request::GenerationRequest;
 use tracing::{info, instrument, trace};
+use url::Url;
 
-pub(crate) struct OllamaClient {}
+#[derive(Default)]
+pub(crate) struct OllamaClient {
+    client: Ollama,
+}
 
 impl OllamaClient {
-    pub(crate) fn new() -> Self {
-        Self {}
+    pub(crate) fn new(host: Url, port: u16) -> anyhow::Result<Self> {
+        Ok(Self {
+            client: Ollama::new(host, port),
+        })
     }
 }
 
@@ -27,13 +33,13 @@ impl ProviderStrategy for OllamaClient {
         info!("Generating commit message");
         trace!(prompt = prompt, "Generating commit message");
 
-        let ollama = Ollama::default();
         let mut request = GenerationRequest::new(model.to_string(), prompt);
         if let Some(think_type) = think {
             request = request.think(think_type);
         }
 
-        let res = ollama
+        let res = self
+            .client
             .generate(request)
             .await
             .context("Failed to connect to Ollama. Is it running?")?;
@@ -51,13 +57,13 @@ impl ProviderStrategy for OllamaClient {
         info!("Generating commit message stream");
         trace!(prompt = prompt, "Generating commit message stream");
 
-        let ollama = Ollama::default();
         let mut request = GenerationRequest::new(model.to_string(), prompt);
         if let Some(think_type) = think {
             request = request.think(think_type);
         }
 
-        let stream = ollama
+        let stream = self
+            .client
             .generate_stream(request)
             .await
             .context("Failed to connect to Ollama. Is it running?")?;

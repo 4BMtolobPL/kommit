@@ -16,6 +16,7 @@ use owo_colors::OwoColorize;
 use std::io::{self, Write};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
+use url::Url;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -55,8 +56,24 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     let lang = args.lang.or(config.lang).unwrap_or(ResponseLang::En);
     let stream_enabled = args.stream.or(config.stream).unwrap_or(false);
     let think = args.think.or(config.think);
+    let host_str = args.host.or(config.host);
+    let port = args
+        .port
+        .or(config.port)
+        .unwrap_or_else(|| provider.default_port());
 
-    let client = create_client(provider);
+    let url = if let Some(h) = host_str {
+        if h.contains("://") {
+            Url::parse(&h)?
+        } else {
+            Url::parse(&format!("http://{}", h))?
+        }
+    } else {
+        provider.default_host()
+    };
+
+    let client = create_client(provider, url, port)?;
+
     let diff = get_diff(args.staged)?;
     let prompt = build_prompt(&diff, lang);
 
@@ -136,6 +153,8 @@ fn config(args: ConfigArgs) -> anyhow::Result<()> {
                     );
                 }
                 ConfigItem::Think { value } => config.think = Some(value),
+                ConfigItem::Host { value } => config.host = Some(value),
+                ConfigItem::Port { value } => config.port = Some(value),
             }
             config.save()?;
             println!("Configuration updated successfully.");
