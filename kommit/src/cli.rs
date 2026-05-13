@@ -50,6 +50,14 @@ pub(crate) struct RunArgs {
     /// Push the changes after committing
     #[arg(short, long)]
     pub(crate) push: bool,
+
+    /// Host of the LLM server
+    #[arg(long, value_name = "HOST")]
+    pub(crate) host: Option<String>,
+
+    /// Port of the LLM server
+    #[arg(long, value_name = "PORT")]
+    pub(crate) port: Option<u16>,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -88,5 +96,11 @@ pub(crate) enum ConfigItem {
     },
     Think {
         value: ThinkType,
+    },
+    Host {
+        value: String,
+    },
+    Port {
+        value: u16,
     },
 }

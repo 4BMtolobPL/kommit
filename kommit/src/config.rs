@@ -14,6 +14,8 @@ pub(crate) struct Config {
     pub(crate) provider: Option<LlmProvider>,
     pub(crate) stream: Option<bool>,
     pub(crate) think: Option<ThinkType>,
+    pub(crate) host: Option<String>,
+    pub(crate) port: Option<u16>,
 }
 
 impl Config {
