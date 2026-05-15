@@ -14,6 +14,14 @@
 
 ## 설치 방법
 
+### 1. Homebrew를 이용한 설치 (macOS)
+
+```bash
+brew install 4BMtolobPL/homebrew-tap/kimtalmo-kommit
+```
+
+### 2. Cargo를 이용한 설치 (Rust)
+
 Rust 툴체인이 설치되어 있어야 합니다.
 
 ```bash
