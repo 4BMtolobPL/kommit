@@ -7,8 +7,10 @@
 
 - 🔍 **Diff 분석**: 스테이징된 변경 사항 또는 현재 작업 트리의 변경 사항을 분석합니다.
 - 📝 **Conventional Commits**: `feat`, `fix`, `refactor` 등 표준화된 커밋 타입을 자동으로 분류합니다.
+- 🏗️ **자동 커밋 및 푸시**: 생성된 메시지로 즉시 커밋하거나 리모트 저장소에 푸시할 수 있습니다.
+- ✏️ **인터랙티브 편집**: 커밋 전 생성된 메시지를 직접 수정할 수 있는 편집 모드를 지원합니다.
 - 🌐 **다국어 지원**: 한국어와 영어 메시지 생성을 지원합니다.
-- 🤖 **다양한 AI 프로바이더**: [Ollama](https://ollama.com/) 및 [LM Studio](https://lmstudio.ai/)와 같은 로컬 LLM을 지원합니다.
+- 🤖 **다양한 AI 프로바이더**: [Ollama](https://ollama.com/) 및 [LM Studio](https://lmstudio.ai/)와 같은 로컬 LLM을 지원하며, 커스텀 호스트와 포트 설정이 가능합니다.
 
 ## 설치 방법
 
@@ -35,11 +37,14 @@ Kommit은 두 가지 주요 서브커맨드를 제공합니다: `run` (메시지
 # 기본 실행 (설정된 기본값 사용)
 kommit run
 
-# 스테이징된 변경 사항만 분석
-kommit run --staged
+# 스테이징된 변경 사항만 분석하고 생성된 메시지 편집
+kommit run --staged --edit
 
-# 특정 언어, 프로바이더, 모델 지정
-kommit run --lang ko --provider ollama --model gemma2
+# 생성 후 즉시 커밋 및 푸시
+kommit run --commit --push
+
+# 특정 언어, 프로바이더, 모델 및 커스텀 서버 주소 지정
+kommit run --lang ko --provider ollama --model gemma2 --host 127.0.0.1 --port 11434
 ```
 
 #### `run` 주요 옵션
@@ -49,9 +54,14 @@ kommit run --lang ko --provider ollama --model gemma2
 | `--staged`       | 스테이징된 변경 사항(`git diff --staged`)만 분석합니다.                           | `false`  |
 | `-m, --model`    | 사용할 LLM 모델 명칭을 지정합니다.                                              | `gemma4` |
 | `-l, --lang`     | 메시지 언어를 지정합니다. (`en`, `ko`)                                        | `en`     |
-| `-p, --provider` | AI 프로바이더를 지정합니다. (`ollama`, `lm-studio`)                           | `ollama` |
+| `--provider`     | AI 프로바이더를 지정합니다. (`ollama`, `lm-studio`)                           | `ollama` |
 | `-s, --stream`   | 스트리밍 응답 활성화 여부를 지정합니다.                                             | `false`  |
 | `-t, --think`    | 추론(Thinking) 레벨을 지정합니다. (`true`, `false`, `low`, `medium`, `high`) | `false`  |
+| `-c, --commit`   | 메시지 생성 후 자동으로 `git commit`을 수행합니다.                               | `false`  |
+| `-p, --push`     | 커밋 후 자동으로 `git push`를 수행합니다.                                       | `false`  |
+| `-e, --edit`     | 커밋 전 사용자가 메시지를 수정할 수 있도록 편집기를 엽니다.                                | `false`  |
+| `--host`         | LLM 서버의 호스트 주소를 지정합니다.                                             | `None`   |
+| `--port`         | LLM 서버의 포트 번호를 지정합니다.                                              | `None`   |
 
 ### 2. 설정 관리 (`config`)
 
@@ -64,8 +74,9 @@ kommit config show
 # 기본 모델 변경
 kommit config set model llama3
 
-# 기본 언어를 한국어로 변경
-kommit config set lang ko
+# LLM 서버 주소 설정
+kommit config set host 192.168.1.10
+kommit config set port 11434
 
 # 설정 디렉토리 열기
 kommit config open
@@ -94,8 +105,8 @@ kommit config open
 
 Kommit은 지속적으로 기능을 확장할 예정입니다:
 
-- [ ] **자동 커밋 및 편집 모드**: 생성된 메시지로 즉시 커밋하거나, 커밋 전 사용자가 메시지를 수정할 수 있는 인터랙티브 모드 추가
+- [x] **자동 커밋 및 편집 모드**: 생성된 메시지로 즉시 커밋하거나, 커밋 전 사용자가 메시지를 수정할 수 있는 인터랙티브 모드 추가
 - [x] **설정 파일 지원**: 매번 옵션을 입력하지 않아도 되도록 `config.toml`을 통한 기본값 설정 기능
 - [ ] **커스텀 프롬프트 템플릿**: 조직 내의 특정 커밋 규칙을 적용할 수 있는 사용자 정의 템플릿 기능
-- [ ] **성능 최적화**: 긴 Diff 처리를 위한 토큰 최적화 및 실시간 메시지 생성을 위한 스트리밍(Streaming) 지원
+- [x] **성능 최적화**: 실시간 메시지 생성을 위한 스트리밍(Streaming) 및 추론(Thinking) 옵션 지원
 - [ ] **프로바이더 확장**: OpenAI, Anthropic 등 클라우드 기반 LLM 서비스 지원 및 API 키 관리 기능
