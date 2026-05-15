@@ -58,6 +58,10 @@ pub(crate) struct RunArgs {
     /// Port of the LLM server
     #[arg(long, value_name = "PORT")]
     pub(crate) port: Option<u16>,
+
+    /// Edit the generated commit message before committing
+    #[arg(short, long)]
+    pub(crate) edit: bool,
 }
 
 #[derive(ClapArgs, Debug)]

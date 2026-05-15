@@ -6,10 +6,10 @@ pub mod provider;
 
 use crate::cli::{Cli, Commands, ConfigArgs, ConfigItem, ConfigSubcommand, RunArgs};
 use crate::config::Config;
-use crate::git::{add_all, commit, get_diff, push};
+use crate::git::{add_all, commit, edit_commit_message, get_diff, push, save_buffer_to_tempfile};
 use crate::prompt::{ResponseLang, build_prompt};
 use crate::provider::{LlmProvider, StreamResponse, create_client};
-use anyhow::{anyhow, bail};
+use anyhow::{Context, anyhow, bail};
 use clap::Parser;
 use futures::StreamExt;
 use owo_colors::OwoColorize;
@@ -109,12 +109,18 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     }
 
     if args.commit || args.push {
-        // TODO: 여기에 커밋메세지 승인하는 기능 넣기
+        let tempfile =
+            save_buffer_to_tempfile(&buffer).context("Failed to save buffer to tempfile")?;
+
+        if args.edit {
+            edit_commit_message(&tempfile).context("Failed to edit commit message")?;
+        }
+
         if !args.staged {
             add_all()?;
         }
 
-        commit(&buffer)?;
+        commit(&tempfile)?;
     }
 
     if args.push {
