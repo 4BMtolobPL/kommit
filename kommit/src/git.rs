@@ -1,4 +1,4 @@
-use anyhow::bail;
+use anyhow::{Context, bail};
 use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
@@ -34,15 +34,12 @@ pub(crate) fn add_all() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn commit(message: &[u8]) -> anyhow::Result<()> {
-    info!(message = %String::from_utf8_lossy(message), "Committing with message");
-
-    let mut tmpfile = NamedTempFile::new()?;
-    tmpfile.write_all(message)?;
+pub(crate) fn commit(file: &NamedTempFile) -> anyhow::Result<()> {
+    info!(file = %file.path().display(), "Committing with message");
 
     Command::new("git")
         .args(["commit", "-F"])
-        .arg(tmpfile.path())
+        .arg(file.path())
         .status()?;
     Ok(())
 }
@@ -51,4 +48,39 @@ pub(crate) fn push() -> anyhow::Result<()> {
     info!("Pushing");
     Command::new("git").args(["push"]).status()?;
     Ok(())
+}
+
+pub(crate) fn save_buffer_to_tempfile(buffer: &[u8]) -> anyhow::Result<NamedTempFile> {
+    let mut tempfile = NamedTempFile::new().context("Cannot create new NamedTempFile")?;
+    tempfile
+        .write_all(buffer)
+        .context("Failed to write buffer to tempfile")?;
+    Ok(tempfile)
+}
+
+pub(crate) fn edit_commit_message(file: &NamedTempFile) -> anyhow::Result<()> {
+    info!(file = %file.path().display(), "Edit commit message by editor");
+
+    let editor_env = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vim".to_string());
+
+    let mut iter = editor_env.split_whitespace();
+    let editor_binary = iter.next().unwrap_or("vim");
+
+    let mut cmd = Command::new(editor_binary);
+    for arg in iter {
+        cmd.arg(arg);
+    }
+
+    let status = cmd
+        .arg(file.path())
+        .status()
+        .context("Failed to execute editor process")?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("Editor exited with non-zero status");
+    }
 }
