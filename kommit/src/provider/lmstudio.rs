@@ -122,7 +122,7 @@ impl ProviderStrategy for LmStudioClient {
                     }
                     StreamEvent::ReasoningEnd => {
 
-                        yield Ok(StreamResponse::Think("\n\n\n".to_string()));
+                        yield Ok(StreamResponse::ThinkDone);
                     }
                     StreamEvent::MessageDelta { content } => {
                         info!(content = %content, event = "message.delta");

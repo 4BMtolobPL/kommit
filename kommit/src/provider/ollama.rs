@@ -69,6 +69,7 @@ impl ProviderStrategy for OllamaClient {
             .context("Failed to connect to Ollama. Is it running?")?;
 
         let mut stream = Box::pin(stream);
+        let mut is_thinking = false;
 
         let s = stream! {
             while let Some(res) = stream.next().await {
@@ -76,8 +77,13 @@ impl ProviderStrategy for OllamaClient {
                     Ok(responses) => {
                         for res in responses {
                             if let Some(thinking) = res.thinking {
+                                is_thinking = true;
                                 yield Ok(StreamResponse::Think(thinking));
                             } else {
+                                if is_thinking {
+                                    is_thinking = false;
+                                    yield Ok(StreamResponse::ThinkDone);
+                                }
                                 yield Ok(StreamResponse::Generate(res.response));
                             }
                         }
