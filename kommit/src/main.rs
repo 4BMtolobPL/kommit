@@ -88,6 +88,9 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
                 StreamResponse::Think(text) => {
                     write!(&mut out, "{}", text.bright_black())?;
                 }
+                StreamResponse::ThinkDone => {
+                    writeln!(&mut out, "\n\n")?;
+                }
                 StreamResponse::Generate(text) => {
                     write!(&mut out, "{}", text)?;
                     write!(&mut buffer, "{}", text)?;

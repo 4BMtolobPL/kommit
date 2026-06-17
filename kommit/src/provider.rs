@@ -42,6 +42,7 @@ impl Display for LlmProvider {
 
 pub(crate) enum StreamResponse {
     Think(String),
+    ThinkDone,
     Generate(String),
 }
 
