@@ -150,15 +150,15 @@ pub mod response {
 
     #[derive(Deserialize, Debug)]
     pub struct StreamError {
-        error_type: ErrorType,
-        message: String,
-        code: Option<String>,
-        param: Option<String>,
+        pub error_type: ErrorType,
+        pub message: String,
+        pub code: Option<String>,
+        pub param: Option<String>,
     }
 
     #[derive(Deserialize, Debug)]
     #[serde(rename_all = "snake_case")]
-    enum ErrorType {
+    pub enum ErrorType {
         InvalidRequest,
         Unknown,
         McpConnectionError,

@@ -108,14 +108,14 @@ pub mod request {
 
     #[derive(Serialize, Clone)]
     #[serde(untagged)]
-    enum Integration {
+    pub enum Integration {
         PluginId(String),
         Integration(Tagged),
     }
 
     #[derive(Serialize, Clone)]
     #[serde(tag = "type", rename_all = "snake_case")]
-    enum Tagged {
+    pub enum Tagged {
         Plugin {
             id: String,
             allowed_tools: Option<Vec<String>>,
