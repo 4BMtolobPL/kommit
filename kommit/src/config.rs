@@ -16,6 +16,7 @@ pub(crate) struct Config {
     pub(crate) think: Option<ThinkType>,
     pub(crate) host: Option<String>,
     pub(crate) port: Option<u16>,
+    pub(crate) exclude_patterns: Option<Vec<String>>,
 }
 
 impl Config {
@@ -65,5 +66,15 @@ impl Config {
 
     pub(crate) fn get_config_dir() -> Option<PathBuf> {
         ProjectDirs::from("", "", "kommit").map(|proj_dirs| proj_dirs.config_dir().to_path_buf())
+    }
+
+    pub(crate) fn get_exclude_patterns(&self) -> Vec<String> {
+        self.exclude_patterns.clone().unwrap_or_else(|| {
+            vec![
+                "*.lock".to_string(),
+                "package-lock.json".to_string(),
+                "pnpm-lock.yaml".to_string(),
+            ]
+        })
     }
 }

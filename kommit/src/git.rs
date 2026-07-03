@@ -4,16 +4,28 @@ use std::process::Command;
 use tempfile::NamedTempFile;
 use tracing::info;
 
-pub(crate) fn get_diff(staged: bool) -> anyhow::Result<String> {
-    info!(%staged, "Getting diff");
-    // TODO: diff 너무 길면 truncate 필요
-    // TODO: binary 파일 제외
+pub(crate) fn get_diff(staged: bool, exclude_patterns: &[String]) -> anyhow::Result<String> {
+    info!(%staged, ?exclude_patterns, "Getting diff");
 
-    let output = if staged {
-        Command::new("git").args(["diff", "--staged"]).output()?
-    } else {
-        Command::new("git").args(["diff"]).output()?
-    };
+    let mut args = vec!["diff"];
+    if staged {
+        args.push("--staged");
+    }
+
+    // Pass pathspec exclusions using git pathspec syntax
+    args.push("--");
+    args.push(".");
+
+    let exclude_args: Vec<String> = exclude_patterns
+        .iter()
+        .map(|pat| format!(":(exclude){}", pat))
+        .collect();
+
+    for arg in &exclude_args {
+        args.push(arg);
+    }
+
+    let output = Command::new("git").args(&args).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -26,6 +38,20 @@ pub(crate) fn get_diff(staged: bool) -> anyhow::Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub(crate) fn get_current_branch() -> anyhow::Result<String> {
+    info!("Getting current branch name");
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git rev-parse failed: {}", stderr);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 pub(crate) fn add_all() -> anyhow::Result<()> {
