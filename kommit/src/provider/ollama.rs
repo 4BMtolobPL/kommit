@@ -1,9 +1,9 @@
 use crate::provider::{LlmStream, ProviderStrategy, StreamResponse, ThinkType};
-use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use ollama_rs::Ollama;
+use ollama_rs::error::OllamaError;
 use ollama_rs::generation::completion::request::GenerationRequest;
 use tracing::{info, instrument, trace};
 use url::Url;
@@ -42,7 +42,7 @@ impl ProviderStrategy for OllamaClient {
             .client
             .generate(request)
             .await
-            .context("Failed to connect to Ollama. Is it running?")?;
+            .map_err(map_ollama_error)?;
 
         Ok(res.response)
     }
@@ -66,7 +66,7 @@ impl ProviderStrategy for OllamaClient {
             .client
             .generate_stream(request)
             .await
-            .context("Failed to connect to Ollama. Is it running?")?;
+            .map_err(map_ollama_error)?;
 
         let mut stream = Box::pin(stream);
         let mut is_thinking = false;
@@ -88,7 +88,7 @@ impl ProviderStrategy for OllamaClient {
                             }
                         }
                     }
-                    Err(e) => yield Err(anyhow::anyhow!(e)),
+                    Err(e) => yield Err(map_ollama_error(e)),
                 }
             }
         };
@@ -106,5 +106,26 @@ impl From<ThinkType> for ollama_rs::generation::parameters::ThinkType {
             ThinkType::Medium => ollama_rs::generation::parameters::ThinkType::Medium,
             ThinkType::High => ollama_rs::generation::parameters::ThinkType::High,
         }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct OllamaErrorResponse {
+    error: String,
+}
+
+fn map_ollama_error(err: OllamaError) -> anyhow::Error {
+    match err {
+        OllamaError::ReqwestError(e) => {
+            anyhow::anyhow!("Failed to connect to Ollama. Is it running? (Error: {})", e)
+        }
+        OllamaError::Other(ref msg) => {
+            if let Ok(err_resp) = serde_json::from_str::<OllamaErrorResponse>(msg) {
+                anyhow::anyhow!("{}", err_resp.error)
+            } else {
+                anyhow::anyhow!("{}", msg)
+            }
+        }
+        _ => anyhow::anyhow!("{}", err),
     }
 }
