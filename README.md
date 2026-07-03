@@ -21,7 +21,7 @@
 ### 1. Homebrew를 이용한 설치 (macOS)
 
 ```bash
-brew install 4BMtolobPL/homebrew-tap/kimtalmo-kommit
+brew install 4BMtolobPL/homebrew-tap/kommit
 ```
 
 ### 2. Cargo를 이용한 설치 (Rust)
