@@ -91,13 +91,13 @@ impl ProviderStrategy for LmStudioClient {
         info!("Generating commit message");
         trace!(prompt = prompt, "Generating commit message");
 
-        let lms = LmStudio::default();
         let mut builder = ChatRequestBuilder::default();
         if let Some(think_type) = think {
             builder.reasoning(think_type);
         }
 
-        let mut stream = lms
+        let mut stream = self
+            .lms
             .chat_stream(builder.model(model).input(prompt).build()?)
             .await
             .context("Failed to connect to LmStudio. Is it running?")?;
