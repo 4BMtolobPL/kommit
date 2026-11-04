@@ -83,7 +83,14 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     let client = create_client(provider, url, port)?;
 
     let exclude_patterns = config.get_exclude_patterns();
-    let diff = get_diff(args.staged, &exclude_patterns)?;
+    // Commit and push must review exactly the tree that will be committed.
+    // Stage all repository changes first, then read that staged diff.
+    let diff = if (args.commit || args.push) && !args.staged {
+        add_all()?;
+        get_diff(true, &exclude_patterns)?
+    } else {
+        get_diff(args.staged, &exclude_patterns)?
+    };
     let branch = get_current_branch().ok();
 
     let diff_len = diff.len();
@@ -175,10 +182,6 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
         if edit_required {
             edit_commit_message(&tempfile).context("Failed to edit commit message")?;
-        }
-
-        if !args.staged {
-            add_all()?;
         }
 
         commit(&tempfile)?;

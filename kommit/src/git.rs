@@ -56,23 +56,32 @@ pub(crate) fn get_current_branch() -> anyhow::Result<String> {
 
 pub(crate) fn add_all() -> anyhow::Result<()> {
     info!("Adding all changes");
-    Command::new("git").args(["add", "--all"]).status()?;
+    let status = Command::new("git").args(["add", "--all"]).status()?;
+    if !status.success() {
+        bail!("git add failed with status {status}");
+    }
     Ok(())
 }
 
 pub(crate) fn commit(file: &NamedTempFile) -> anyhow::Result<()> {
     info!(file = %file.path().display(), "Committing with message");
 
-    Command::new("git")
+    let status = Command::new("git")
         .args(["commit", "-F"])
         .arg(file.path())
         .status()?;
+    if !status.success() {
+        bail!("git commit failed with status {status}");
+    }
     Ok(())
 }
 
 pub(crate) fn push() -> anyhow::Result<()> {
     info!("Pushing");
-    Command::new("git").args(["push"]).status()?;
+    let status = Command::new("git").args(["push"]).status()?;
+    if !status.success() {
+        bail!("git push failed with status {status}");
+    }
     Ok(())
 }
 
@@ -108,5 +117,66 @@ pub(crate) fn edit_commit_message(file: &NamedTempFile) -> anyhow::Result<()> {
         Ok(())
     } else {
         bail!("Editor exited with non-zero status");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    #[test]
+    fn staged_diff_includes_untracked_files_after_add_all() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(repo.path(), &["config", "user.name", "Test"]);
+        fs::write(repo.path().join("tracked.txt"), "before\n").unwrap();
+        git(repo.path(), &["add", "tracked.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        fs::write(repo.path().join("tracked.txt"), "after\n").unwrap();
+        fs::write(repo.path().join(".env"), "API_KEY=secret\n").unwrap();
+
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(repo.path()).unwrap();
+        add_all().unwrap();
+        let diff = get_diff(true, &[]).unwrap();
+        std::env::set_current_dir(old).unwrap();
+
+        assert!(diff.contains("tracked.txt"));
+        assert!(diff.contains(".env"));
+        assert!(diff.contains("API_KEY=secret"));
+    }
+
+    #[test]
+    fn commit_reports_git_failure() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(repo.path()).unwrap();
+        let message = save_buffer_to_tempfile(b"feat: test").unwrap();
+        let result = commit(&message);
+        std::env::set_current_dir(old).unwrap();
+        assert!(result.is_err());
     }
 }
