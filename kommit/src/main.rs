@@ -303,8 +303,7 @@ fn clean_commit_message(msg: &str) -> String {
 
     if cleaned.len() >= 2
         && ((cleaned.starts_with('"') && cleaned.ends_with('"'))
-        || (cleaned.starts_with('\'') && cleaned.ends_with('\''))
-        )
+            || (cleaned.starts_with('\'') && cleaned.ends_with('\'')))
     {
         cleaned = cleaned[1..cleaned.len() - 1].trim().to_string();
     }
