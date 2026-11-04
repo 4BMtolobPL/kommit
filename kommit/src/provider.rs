@@ -15,6 +15,7 @@ pub mod ollama;
 #[serde(rename_all = "lowercase")]
 pub(crate) enum LlmProvider {
     Ollama,
+    #[serde(rename = "lm-studio", alias = "lmstudio")]
     LmStudio,
 }
 
