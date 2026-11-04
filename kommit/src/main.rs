@@ -301,8 +301,9 @@ fn clean_commit_message(msg: &str) -> String {
         }
     }
 
-    if (cleaned.starts_with('"') && cleaned.ends_with('"'))
-        || (cleaned.starts_with('\'') && cleaned.ends_with('\''))
+    if cleaned.len() >= 2
+        && ((cleaned.starts_with('"') && cleaned.ends_with('"'))
+            || (cleaned.starts_with('\'') && cleaned.ends_with('\'')))
     {
         cleaned = cleaned[1..cleaned.len() - 1].trim().to_string();
     }
@@ -369,6 +370,9 @@ mod tests {
 
         let msg2 = "  'fix: db memory leak'  ";
         assert_eq!(clean_commit_message(msg2), "fix: db memory leak");
+
+        assert_eq!(clean_commit_message("'"), "'");
+        assert_eq!(clean_commit_message("\""), "\"");
     }
 
     #[test]
