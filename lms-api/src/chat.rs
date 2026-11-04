@@ -1,3 +1,4 @@
+#[cfg(feature = "stream")]
 pub mod stream;
 
 use crate::LmStudio;
