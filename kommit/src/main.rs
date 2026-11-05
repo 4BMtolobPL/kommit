@@ -7,8 +7,8 @@ pub mod provider;
 use crate::cli::{Cli, Commands, ConfigArgs, ConfigItem, ConfigSubcommand, RunArgs};
 use crate::config::Config;
 use crate::git::{
-    add_all, commit, edit_commit_message, get_current_branch, get_diff, push,
-    save_buffer_to_tempfile,
+    apply_tree, commit, edit_commit_message, get_current_branch, get_diff, get_diff_for_commit,
+    push, save_buffer_to_tempfile,
 };
 use crate::prompt::{
     ResponseLang, build_commit_from_summaries_prompt, build_prompt, build_summary_prompt,
@@ -83,7 +83,13 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     let client = create_client(provider, url, port)?;
 
     let exclude_patterns = config.get_exclude_patterns();
-    let diff = get_diff(args.staged, &exclude_patterns)?;
+    // Review the repository changes without modifying the real index.
+    let (diff, reviewed_tree) = if args.commit || args.push {
+        let (diff, tree) = get_diff_for_commit(args.staged, &exclude_patterns)?;
+        (diff, Some(tree))
+    } else {
+        (get_diff(args.staged, &exclude_patterns)?, None)
+    };
     let branch = get_current_branch().ok();
 
     let diff_len = diff.len();
@@ -177,10 +183,9 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             edit_commit_message(&tempfile).context("Failed to edit commit message")?;
         }
 
-        if !args.staged {
-            add_all()?;
+        if let Some(tree) = reviewed_tree {
+            apply_tree(&tree)?;
         }
-
         commit(&tempfile)?;
     }
 
