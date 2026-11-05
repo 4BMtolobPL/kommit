@@ -241,6 +241,16 @@ fn config(args: ConfigArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+const MAX_CHUNK_BYTES: usize = 12000;
+
+fn truncate_chunk(chunk: String) -> String {
+    if chunk.len() <= MAX_CHUNK_BYTES {
+        return chunk;
+    }
+    let end = chunk.floor_char_boundary(MAX_CHUNK_BYTES);
+    format!("{}\n...(truncated due to size)...", &chunk[..end])
+}
+
 fn split_diff(diff: &str) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current_chunk = String::new();
@@ -269,11 +279,7 @@ async fn generate_summary_for_chunks(
     let mut summaries = Vec::new();
     let total_chunks = chunks.len();
     for (i, chunk) in chunks.into_iter().enumerate() {
-        let chunk_to_send = if chunk.len() > 12000 {
-            format!("{}\n...(truncated due to size)...", &chunk[..12000])
-        } else {
-            chunk
-        };
+        let chunk_to_send = truncate_chunk(chunk);
 
         let summary_prompt = build_summary_prompt(&chunk_to_send, lang.clone());
         println!("⏳ Summarizing diff chunk {}/{}...", i + 1, total_chunks);
@@ -361,6 +367,51 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].contains("first"));
         assert!(chunks[1].contains("second"));
+    }
+
+    const TRUNCATION_NOTICE: &str = "\n...(truncated due to size)...";
+
+    fn assert_truncated_to(input: String, expected_len: usize) {
+        let expected_body = input[..expected_len].to_string();
+        let result = truncate_chunk(input);
+        let body = result
+            .strip_suffix(TRUNCATION_NOTICE)
+            .expect("truncated chunk should end with the notice");
+        assert_eq!(body.len(), expected_len);
+        assert_eq!(body, expected_body);
+    }
+
+    // 12,000 is a multiple of 3, so this limit lands on a boundary of '가'.
+    #[test]
+    fn test_truncate_chunk_multibyte_on_boundary() {
+        assert_truncated_to("가".repeat(5000), 12000);
+    }
+
+    // Reproduces issue #38: byte 12,000 is inside '가' (bytes 11998..12001).
+    #[test]
+    fn test_truncate_chunk_multibyte_one_byte_offset() {
+        assert_truncated_to(format!("a{}", "가".repeat(5000)), 11998);
+    }
+
+    #[test]
+    fn test_truncate_chunk_multibyte_two_byte_offset() {
+        assert_truncated_to(format!("aa{}", "가".repeat(5000)), 11999);
+    }
+
+    #[test]
+    fn test_truncate_chunk_four_byte_char() {
+        assert_truncated_to(format!("a{}", "😀".repeat(3000)), 11997);
+    }
+
+    #[test]
+    fn test_truncate_chunk_ascii_over_limit() {
+        assert_truncated_to("a".repeat(12001), 12000);
+    }
+
+    #[test]
+    fn test_truncate_chunk_at_limit_is_unchanged() {
+        let input = "a".repeat(12000);
+        assert_eq!(truncate_chunk(input.clone()), input);
     }
 
     #[test]
