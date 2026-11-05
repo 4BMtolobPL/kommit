@@ -5,14 +5,22 @@ use std::process::Command;
 use tempfile::NamedTempFile;
 use tracing::info;
 
-pub(crate) fn get_diff(staged: bool, exclude_patterns: &[String]) -> anyhow::Result<String> {
-    get_diff_with_index(staged, exclude_patterns, None)
+/// How many excluded files to name before summarizing the rest as a count.
+const MAX_LISTED_EXCLUDED_FILES: usize = 10;
+
+/// A snapshot of the repository changes: what the LLM reads and what gets committed.
+pub(crate) struct ReviewedChanges {
+    pub(crate) diff: String,
+    pub(crate) tree: String,
 }
 
-pub(crate) fn get_diff_for_commit(
+/// Snapshots the changes of the whole repository in a temporary index, leaving the real one alone.
+pub(crate) fn review_changes(
     staged: bool,
     exclude_patterns: &[String],
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<ReviewedChanges> {
+    info!(%staged, ?exclude_patterns, "Reviewing changes");
+
     let root = git_path(&["rev-parse", "--show-toplevel"])?;
     let index = git_path(&["rev-parse", "--git-path", "index"])?;
     let temporary_dir = tempfile::tempdir()?;
@@ -23,9 +31,7 @@ pub(crate) fn get_diff_for_commit(
     }
 
     if !staged {
-        let status = Command::new("git")
-            .current_dir(&root)
-            .env("GIT_INDEX_FILE", &temporary_index)
+        let status = git_with_index(&root, &temporary_index)
             .args(["add", "--all"])
             .status()?;
         if !status.success() {
@@ -33,10 +39,8 @@ pub(crate) fn get_diff_for_commit(
         }
     }
 
-    let diff = get_diff_with_index_at(true, exclude_patterns, Some(&temporary_index), Some(&root))?;
-    let output = Command::new("git")
-        .current_dir(&root)
-        .env("GIT_INDEX_FILE", &temporary_index)
+    // Before reading the diff, so that unresolved conflicts are reported as such.
+    let output = git_with_index(&root, &temporary_index)
         .arg("write-tree")
         .output()?;
     if !output.status.success() {
@@ -45,7 +49,27 @@ pub(crate) fn get_diff_for_commit(
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    Ok((diff, String::from_utf8(output.stdout)?.trim().to_owned()))
+    let tree = String::from_utf8(output.stdout)?.trim().to_owned();
+
+    let diff = read_staged_diff(&root, &temporary_index, exclude_patterns)?;
+    if diff.is_empty() {
+        let changed_files = read_staged_file_names(&root, &temporary_index)?;
+        if changed_files.is_empty() {
+            bail!("git diff is empty");
+        }
+        bail!(
+            "Only excluded files changed: {}. Use git add and git commit to commit them.",
+            summarize_file_names(&changed_files)
+        );
+    }
+
+    Ok(ReviewedChanges { diff, tree })
+}
+
+fn git_with_index(root: &Path, index: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(root).env("GIT_INDEX_FILE", index);
+    command
 }
 
 fn git_path(args: &[&str]) -> anyhow::Result<PathBuf> {
@@ -57,64 +81,71 @@ fn git_path(args: &[&str]) -> anyhow::Result<PathBuf> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
+    path_from_git_output(&output.stdout)
 }
 
-fn get_diff_with_index(
-    staged: bool,
-    exclude_patterns: &[String],
-    index: Option<&Path>,
-) -> anyhow::Result<String> {
-    get_diff_with_index_at(staged, exclude_patterns, index, None)
+#[cfg(unix)]
+fn path_from_git_output(stdout: &[u8]) -> anyhow::Result<PathBuf> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // Unix paths are arbitrary bytes, so they may be neither UTF-8 nor free of edge whitespace.
+    let path = stdout.strip_suffix(b"\n").unwrap_or(stdout);
+    Ok(PathBuf::from(OsStr::from_bytes(path)))
 }
 
-fn get_diff_with_index_at(
-    staged: bool,
+#[cfg(not(unix))]
+fn path_from_git_output(stdout: &[u8]) -> anyhow::Result<PathBuf> {
+    Ok(PathBuf::from(std::str::from_utf8(stdout)?.trim()))
+}
+
+fn read_staged_diff(
+    root: &Path,
+    index: &Path,
     exclude_patterns: &[String],
-    index: Option<&Path>,
-    root: Option<&Path>,
 ) -> anyhow::Result<String> {
-    info!(%staged, ?exclude_patterns, "Getting diff");
-
-    let mut args = vec!["diff"];
-    if staged {
-        args.push("--staged");
-    }
-
     // Pass pathspec exclusions using git pathspec syntax
-    args.push("--");
-    args.push(".");
-
-    let exclude_args: Vec<String> = exclude_patterns
+    let exclude_args = exclude_patterns
         .iter()
-        .map(|pat| format!(":(exclude){}", pat))
-        .collect();
+        .map(|pat| format!(":(exclude){}", pat));
 
-    for arg in &exclude_args {
-        args.push(arg);
-    }
-
-    let mut command = Command::new("git");
-    command.args(&args);
-    if let Some(root) = root {
-        command.current_dir(root);
-    }
-    if let Some(index) = index {
-        command.env("GIT_INDEX_FILE", index);
-    }
-    let output = command.output()?;
+    let output = git_with_index(root, index)
+        .args(["diff", "--staged", "--", "."])
+        .args(exclude_args)
+        .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git diff failed: {}", stderr);
     }
 
-    // output이 비어있을때 처리
-    if output.stdout.is_empty() {
-        bail!("git diff is empty");
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn read_staged_file_names(root: &Path, index: &Path) -> anyhow::Result<Vec<String>> {
+    let output = git_with_index(root, index)
+        .args(["diff", "--staged", "--name-only", "-z"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git diff failed: {}", stderr);
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(output
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect())
+}
+
+fn summarize_file_names(names: &[String]) -> String {
+    let listed = names[..names.len().min(MAX_LISTED_EXCLUDED_FILES)].join(", ");
+    match names.len().saturating_sub(MAX_LISTED_EXCLUDED_FILES) {
+        0 => listed,
+        hidden => format!("{listed} and {hidden} more"),
+    }
 }
 
 pub(crate) fn get_current_branch() -> anyhow::Result<String> {
@@ -258,7 +289,7 @@ mod tests {
         fs::write(repo.path().join("new.txt"), "new\n").unwrap();
 
         let _cwd = CwdGuard::enter(repo.path());
-        let (diff, _) = get_diff_for_commit(false, &[]).unwrap();
+        let diff = review_changes(false, &[]).unwrap().diff;
         let status_before = Command::new("git")
             .args(["status", "--porcelain"])
             .output()
@@ -290,7 +321,7 @@ mod tests {
         fs::create_dir(repo.path().join("sub")).unwrap();
         fs::write(repo.path().join("root.txt"), "reviewed\n").unwrap();
         let _cwd = CwdGuard::enter(&repo.path().join("sub"));
-        let (diff, tree) = get_diff_for_commit(false, &[]).unwrap();
+        let ReviewedChanges { diff, tree } = review_changes(false, &[]).unwrap();
         assert!(diff.contains("+reviewed"));
         fs::write(repo.path().join("root.txt"), "later\n").unwrap();
         apply_tree(&tree).unwrap();
@@ -326,7 +357,7 @@ mod tests {
         );
         fs::write(linked.join("file.txt"), "after\n").unwrap();
         let _cwd = CwdGuard::enter(&linked);
-        let (diff, tree) = get_diff_for_commit(false, &[]).unwrap();
+        let ReviewedChanges { diff, tree } = review_changes(false, &[]).unwrap();
         assert!(diff.contains("+after"));
         apply_tree(&tree).unwrap();
         commit(&save_buffer_to_tempfile(b"test: linked").unwrap()).unwrap();
@@ -340,7 +371,7 @@ mod tests {
         fs::write(repo.path().join("file.txt"), "reviewed\n").unwrap();
         git(repo.path(), &["add", "file.txt"]);
         let _cwd = CwdGuard::enter(repo.path());
-        let (diff, tree) = get_diff_for_commit(true, &[]).unwrap();
+        let ReviewedChanges { diff, tree } = review_changes(true, &[]).unwrap();
         assert!(diff.contains("+reviewed"));
         fs::write(repo.path().join("file.txt"), "later\n").unwrap();
         git(repo.path(), &["add", "file.txt"]);
@@ -372,7 +403,7 @@ mod tests {
         // The flag must survive the first commit to protect the second one.
         for content in ["2\n", "3\n"] {
             fs::write(repo.path().join("file.txt"), content).unwrap();
-            let (diff, tree) = get_diff_for_commit(false, &[]).unwrap();
+            let ReviewedChanges { diff, tree } = review_changes(false, &[]).unwrap();
             assert!(!diff.contains("local only"));
             apply_tree(&tree).unwrap();
             commit(&save_buffer_to_tempfile(b"test: skip worktree").unwrap()).unwrap();
@@ -383,5 +414,170 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(output.stdout, b"shared\n");
+    }
+
+    fn porcelain_status() -> String {
+        let output = Command::new("git")
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn lock_patterns() -> Vec<String> {
+        vec!["*.lock".to_owned()]
+    }
+
+    #[test]
+    fn staged_review_from_subdirectory_includes_other_directories() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::create_dir(repo.path().join("sub")).unwrap();
+        fs::create_dir(repo.path().join("other")).unwrap();
+        fs::write(repo.path().join("other/file.txt"), "elsewhere\n").unwrap();
+        git(repo.path(), &["add", "other/file.txt"]);
+
+        let _cwd = CwdGuard::enter(&repo.path().join("sub"));
+        let diff = review_changes(true, &[]).unwrap().diff;
+
+        assert!(diff.contains("+elsewhere"), "diff was {diff:?}");
+    }
+
+    #[test]
+    fn only_excluded_changes_are_named_and_keep_the_index() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::write(repo.path().join("Cargo.lock"), "1\n").unwrap();
+        git(repo.path(), &["add", "Cargo.lock"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        fs::write(repo.path().join("Cargo.lock"), "2\n").unwrap();
+        let _cwd = CwdGuard::enter(repo.path());
+
+        let error = review_changes(false, &lock_patterns())
+            .err()
+            .expect("review should fail")
+            .to_string();
+
+        assert_eq!(
+            error,
+            "Only excluded files changed: Cargo.lock. Use git add and git commit to commit them."
+        );
+        assert_eq!(porcelain_status(), " M Cargo.lock\n");
+    }
+
+    #[test]
+    fn staged_review_ignores_unstaged_excluded_changes() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::write(repo.path().join("Cargo.lock"), "1\n").unwrap();
+        git(repo.path(), &["add", "Cargo.lock"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        fs::write(repo.path().join("Cargo.lock"), "2\n").unwrap();
+        let _cwd = CwdGuard::enter(repo.path());
+
+        let error = review_changes(true, &lock_patterns())
+            .err()
+            .expect("review should fail")
+            .to_string();
+
+        assert_eq!(error, "git diff is empty");
+    }
+
+    #[test]
+    fn long_excluded_file_lists_are_shortened() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        for number in 10..=21 {
+            fs::write(repo.path().join(format!("{number}.lock")), "1\n").unwrap();
+        }
+        let _cwd = CwdGuard::enter(repo.path());
+
+        let error = review_changes(false, &lock_patterns())
+            .err()
+            .expect("review should fail")
+            .to_string();
+
+        assert!(error.contains("19.lock and 2 more."), "error was {error:?}");
+        assert!(!error.contains("20.lock"), "error was {error:?}");
+    }
+
+    #[test]
+    fn ten_excluded_files_are_all_listed() {
+        let names: Vec<String> = (0..10).map(|number| format!("{number}.lock")).collect();
+        assert_eq!(summarize_file_names(&names), names.join(", "));
+    }
+
+    #[test]
+    fn no_changes_report_an_empty_diff() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        let _cwd = CwdGuard::enter(repo.path());
+
+        for staged in [false, true] {
+            let error = review_changes(staged, &lock_patterns())
+                .err()
+                .expect("review should fail")
+                .to_string();
+            assert_eq!(error, "git diff is empty");
+        }
+    }
+
+    #[test]
+    fn unresolved_conflict_in_excluded_file_is_reported_as_conflict() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::write(repo.path().join("Cargo.lock"), "base\n").unwrap();
+        git(repo.path(), &["add", "Cargo.lock"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+        git(repo.path(), &["checkout", "--quiet", "-b", "theirs"]);
+        fs::write(repo.path().join("Cargo.lock"), "theirs\n").unwrap();
+        git(repo.path(), &["commit", "--quiet", "-am", "theirs"]);
+        git(repo.path(), &["checkout", "--quiet", "-"]);
+        fs::write(repo.path().join("Cargo.lock"), "ours\n").unwrap();
+        git(repo.path(), &["commit", "--quiet", "-am", "ours"]);
+        let merge = Command::new("git")
+            .current_dir(repo.path())
+            .args(["merge", "--quiet", "theirs"])
+            .output()
+            .unwrap();
+        assert!(!merge.status.success());
+        let _cwd = CwdGuard::enter(repo.path());
+
+        let error = review_changes(true, &lock_patterns())
+            .err()
+            .expect("review should fail")
+            .to_string();
+
+        assert!(
+            error.contains("git write-tree failed"),
+            "error was {error:?}"
+        );
+    }
+
+    // Other Unix file systems, such as APFS, reject paths that are not valid UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn repository_path_may_be_invalid_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let _lock = cwd_lock();
+        let parent = tempfile::tempdir().unwrap();
+        let repo = parent.path().join(OsStr::from_bytes(b"repo-\xff "));
+        fs::create_dir(&repo).unwrap();
+        init(&repo);
+        fs::create_dir(repo.join("sub")).unwrap();
+        fs::write(repo.join("file.txt"), "reviewed\n").unwrap();
+
+        let _cwd = CwdGuard::enter(&repo.join("sub"));
+        let diff = review_changes(false, &[]).unwrap().diff;
+
+        assert!(diff.contains("+reviewed"), "diff was {diff:?}");
     }
 }
