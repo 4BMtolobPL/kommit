@@ -132,7 +132,10 @@ pub(crate) fn get_current_branch() -> anyhow::Result<String> {
 }
 
 pub(crate) fn apply_tree(tree: &str) -> anyhow::Result<()> {
-    let status = Command::new("git").args(["read-tree", tree]).status()?;
+    // `--reset` keeps per-entry flags such as skip-worktree and assume-unchanged.
+    let status = Command::new("git")
+        .args(["read-tree", "--reset", tree])
+        .status()?;
     if !status.success() {
         bail!("git read-tree failed with status {status}");
     }
@@ -235,6 +238,8 @@ mod tests {
     fn init(repo: &Path) {
         git(repo, &["init", "--quiet"]);
         git(repo, &["config", "core.excludesFile", ""]);
+        git(repo, &["config", "core.hooksPath", "/dev/null"]);
+        git(repo, &["config", "commit.gpgSign", "false"]);
         git(repo, &["config", "user.email", "test@example.invalid"]);
         git(repo, &["config", "user.name", "Test"]);
     }
@@ -346,5 +351,37 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(output.stdout, b"reviewed\n");
+    }
+
+    #[test]
+    fn skip_worktree_changes_stay_out_of_later_commits() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::write(repo.path().join("file.txt"), "1\n").unwrap();
+        fs::write(repo.path().join("local.txt"), "shared\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        git(
+            repo.path(),
+            &["update-index", "--skip-worktree", "local.txt"],
+        );
+        fs::write(repo.path().join("local.txt"), "local only\n").unwrap();
+        let _cwd = CwdGuard::enter(repo.path());
+
+        // The flag must survive the first commit to protect the second one.
+        for content in ["2\n", "3\n"] {
+            fs::write(repo.path().join("file.txt"), content).unwrap();
+            let (diff, tree) = get_diff_for_commit(false, &[]).unwrap();
+            assert!(!diff.contains("local only"));
+            apply_tree(&tree).unwrap();
+            commit(&save_buffer_to_tempfile(b"test: skip worktree").unwrap()).unwrap();
+        }
+
+        let output = Command::new("git")
+            .args(["show", "HEAD:local.txt"])
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, b"shared\n");
     }
 }
