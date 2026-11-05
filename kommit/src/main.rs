@@ -19,6 +19,7 @@ use clap::Parser;
 use futures::StreamExt;
 use owo_colors::OwoColorize;
 use std::io::{self, Write};
+use tempfile::NamedTempFile;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 use url::Url;
@@ -179,8 +180,15 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             edit_commit_message(&tempfile).context("Failed to edit commit message")?;
         }
 
-        apply_tree(&reviewed.tree)?;
-        commit(&tempfile)?;
+        let result = (|| {
+            apply_tree(&reviewed.tree)?;
+            commit(&tempfile)
+        })();
+
+        if let Err(err) = result {
+            print_unused_message(&tempfile, &final_message);
+            return Err(err);
+        }
     }
 
     if args.push {
@@ -188,6 +196,21 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Prints the message that failed to be committed so the user can reuse it.
+/// The tempfile takes precedence because it holds any edits made by the user,
+/// and it is deleted when the process exits.
+fn print_unused_message(tempfile: &NamedTempFile, fallback: &str) {
+    let edited = std::fs::read_to_string(tempfile.path()).unwrap_or_default();
+    let message = if edited.trim().is_empty() {
+        fallback
+    } else {
+        edited.trim()
+    };
+
+    eprintln!("{}", "The commit was not created. Commit message:".yellow());
+    eprintln!("{message}");
 }
 
 fn config(args: ConfigArgs) -> anyhow::Result<()> {
