@@ -1,10 +1,38 @@
 use anyhow::{Context, bail};
 use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 use tempfile::NamedTempFile;
 use tracing::info;
 
 pub(crate) fn get_diff(staged: bool, exclude_patterns: &[String]) -> anyhow::Result<String> {
+    get_diff_with_index(staged, exclude_patterns, None)
+}
+
+pub(crate) fn get_diff_for_commit(exclude_patterns: &[String]) -> anyhow::Result<String> {
+    let index = Path::new(".git/index");
+    let temporary_index = NamedTempFile::new_in(".git")?;
+    if index.exists() {
+        std::fs::copy(index, temporary_index.path())
+            .with_context(|| format!("failed to copy {}", index.display()))?;
+    }
+
+    let status = Command::new("git")
+        .env("GIT_INDEX_FILE", temporary_index.path())
+        .args(["add", "--all"])
+        .status()?;
+    if !status.success() {
+        bail!("git add failed with status {status}");
+    }
+
+    get_diff_with_index(true, exclude_patterns, Some(temporary_index.path()))
+}
+
+fn get_diff_with_index(
+    staged: bool,
+    exclude_patterns: &[String],
+    index: Option<&Path>,
+) -> anyhow::Result<String> {
     info!(%staged, ?exclude_patterns, "Getting diff");
 
     let mut args = vec!["diff"];
@@ -25,7 +53,12 @@ pub(crate) fn get_diff(staged: bool, exclude_patterns: &[String]) -> anyhow::Res
         args.push(arg);
     }
 
-    let output = Command::new("git").args(&args).output()?;
+    let mut command = Command::new("git");
+    command.args(&args);
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    let output = command.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -124,11 +157,14 @@ pub(crate) fn edit_commit_message(file: &NamedTempFile) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
 
     fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn git(repo: &std::path::Path, args: &[&str]) {
@@ -140,37 +176,66 @@ mod tests {
         assert!(status.success(), "git {:?} failed", args);
     }
 
+    struct GlobalConfigGuard(Option<OsString>);
+
+    impl GlobalConfigGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("GIT_CONFIG_GLOBAL");
+            unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", path) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for GlobalConfigGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", value) },
+                None => unsafe { std::env::remove_var("GIT_CONFIG_GLOBAL") },
+            }
+        }
+    }
+
     #[test]
-    fn staged_diff_includes_untracked_files_after_add_all() {
+    fn commit_diff_does_not_modify_real_index() {
         let _lock = cwd_lock();
         let repo = tempfile::tempdir().unwrap();
+        let global_config = repo.path().join("empty-global-config");
+        fs::write(&global_config, "").unwrap();
+        let _global_config = GlobalConfigGuard::set(&global_config);
         git(repo.path(), &["init", "--quiet"]);
-        git(
-            repo.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
+        git(repo.path(), &["config", "user.email", "test@example.invalid"]);
         git(repo.path(), &["config", "user.name", "Test"]);
         fs::write(repo.path().join("tracked.txt"), "before\n").unwrap();
         git(repo.path(), &["add", "tracked.txt"]);
         git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
-        fs::write(repo.path().join("tracked.txt"), "after\n").unwrap();
-        fs::write(repo.path().join(".env"), "API_KEY=secret\n").unwrap();
+        fs::write(repo.path().join("tracked.txt"), "staged\n").unwrap();
+        git(repo.path(), &["add", "tracked.txt"]);
+        fs::write(repo.path().join("tracked.txt"), "unstaged\n").unwrap();
+        fs::write(repo.path().join("new.txt"), "new\n").unwrap();
 
         let old = std::env::current_dir().unwrap();
         std::env::set_current_dir(repo.path()).unwrap();
-        add_all().unwrap();
-        let diff = get_diff(true, &[]).unwrap();
+        let diff = get_diff_for_commit(&[]).unwrap();
+        let status_before = Command::new("git")
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
         std::env::set_current_dir(old).unwrap();
 
         assert!(diff.contains("tracked.txt"));
-        assert!(diff.contains(".env"));
-        assert!(diff.contains("API_KEY=secret"));
+        assert!(diff.contains("new.txt"));
+        let status = String::from_utf8_lossy(&status_before.stdout);
+        assert!(status.contains("MM tracked.txt"), "status was {status:?}");
+        assert!(status.contains("?? new.txt"), "status was {status:?}");
     }
 
     #[test]
     fn commit_reports_git_failure() {
         let _lock = cwd_lock();
         let repo = tempfile::tempdir().unwrap();
+        let global_config = repo.path().join("empty-global-config");
+        fs::write(&global_config, "").unwrap();
+        let _global_config = GlobalConfigGuard::set(&global_config);
         git(repo.path(), &["init", "--quiet"]);
         let old = std::env::current_dir().unwrap();
         std::env::set_current_dir(repo.path()).unwrap();

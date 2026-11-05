@@ -7,7 +7,7 @@ pub mod provider;
 use crate::cli::{Cli, Commands, ConfigArgs, ConfigItem, ConfigSubcommand, RunArgs};
 use crate::config::Config;
 use crate::git::{
-    add_all, commit, edit_commit_message, get_current_branch, get_diff, push,
+    add_all, commit, edit_commit_message, get_current_branch, get_diff, get_diff_for_commit, push,
     save_buffer_to_tempfile,
 };
 use crate::prompt::{
@@ -83,11 +83,9 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     let client = create_client(provider, url, port)?;
 
     let exclude_patterns = config.get_exclude_patterns();
-    // Commit and push must review exactly the tree that will be committed.
-    // Stage all repository changes first, then read that staged diff.
+    // Review the repository changes without modifying the real index.
     let diff = if (args.commit || args.push) && !args.staged {
-        add_all()?;
-        get_diff(true, &exclude_patterns)?
+        get_diff_for_commit(&exclude_patterns)?
     } else {
         get_diff(args.staged, &exclude_patterns)?
     };
@@ -184,6 +182,9 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             edit_commit_message(&tempfile).context("Failed to edit commit message")?;
         }
 
+        if !args.staged {
+            add_all()?;
+        }
         commit(&tempfile)?;
     }
 
