@@ -18,7 +18,7 @@ use anyhow::{Context, anyhow, bail};
 use clap::Parser;
 use futures::StreamExt;
 use owo_colors::OwoColorize;
-use std::io::{self, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use tempfile::NamedTempFile;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -86,6 +86,11 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     let exclude_patterns = config.get_exclude_patterns();
     // Review a snapshot of the whole repository without touching the real index.
     let reviewed = review_changes(args.staged, &exclude_patterns)?;
+    // Before anything reaches the LLM, which may be a remote server.
+    if !reviewed.untracked.is_empty() && !args.yes {
+        let stdin = io::stdin();
+        confirm_untracked(&reviewed.untracked, stdin.is_terminal(), &mut stdin.lock())?;
+    }
     let diff = reviewed.diff;
     let branch = get_current_branch().ok();
 
@@ -217,6 +222,47 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Lists the untracked files on stderr and asks whether to include them, failing unless
+/// the answer is yes. Every file is named, since a hidden one could be the secret.
+fn confirm_untracked(
+    files: &[String],
+    is_terminal: bool,
+    input: &mut impl BufRead,
+) -> anyhow::Result<()> {
+    if !is_terminal {
+        bail!(
+            "Untracked files would be sent to the LLM and committed: {}. Pass --yes to include them, or use --staged.",
+            files.join(", ")
+        );
+    }
+
+    let mut stderr = io::stderr().lock();
+    writeln!(
+        stderr,
+        "{}",
+        "Untracked files will be sent to the LLM and committed:".yellow()
+    )?;
+    for file in files {
+        writeln!(stderr, "  {file}")?;
+    }
+    write!(
+        stderr,
+        "Include these {} untracked files? [y/N] ",
+        files.len()
+    )?;
+    stderr.flush()?;
+    drop(stderr);
+
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    let answer = answer.trim();
+    if answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes") {
+        Ok(())
+    } else {
+        bail!("Aborted: untracked files were not included.")
+    }
 }
 
 /// Prints the message that failed to be committed so the user can reuse it.
@@ -397,6 +443,29 @@ fn validate_commit_message(msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn confirm(input: &[u8], is_terminal: bool) -> anyhow::Result<()> {
+        let files = [".env".to_owned()];
+        confirm_untracked(&files, is_terminal, &mut io::Cursor::new(input))
+    }
+
+    #[test]
+    fn untracked_files_are_included_only_on_yes() {
+        for input in [&b"y\n"[..], b"YES\n", b" Yes "] {
+            assert!(confirm(input, true).is_ok(), "{input:?}");
+        }
+        for input in [&b"n\n"[..], b"\n", b"", b"yess\n"] {
+            let error = confirm(input, true).unwrap_err().to_string();
+            assert_eq!(error, "Aborted: untracked files were not included.");
+        }
+    }
+
+    #[test]
+    fn untracked_files_without_a_terminal_need_yes() {
+        let error = confirm(b"y\n", false).unwrap_err().to_string();
+        assert!(error.contains(".env"), "{error}");
+        assert!(error.contains("--yes"), "{error}");
+    }
 
     #[test]
     fn test_split_diff_empty() {

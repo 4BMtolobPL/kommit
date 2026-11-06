@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tempfile::{NamedTempFile, TempDir};
 use tracing::info;
 
@@ -12,6 +12,8 @@ const MAX_LISTED_EXCLUDED_FILES: usize = 10;
 pub(crate) struct ReviewedChanges {
     pub(crate) diff: String,
     pub(crate) tree: String,
+    /// The untracked files included in `diff` and `tree`, always empty for `--staged`.
+    pub(crate) untracked: Vec<String>,
 }
 
 /// Snapshots the changes of the whole repository in a temporary index, leaving the real one alone.
@@ -39,13 +41,24 @@ pub(crate) fn review_changes(
         );
     }
 
+    let mut untracked = Vec::new();
     if !staged {
+        // Instead of `git add --all`, add exactly the listed untracked files, so that a file
+        // created after the listing cannot slip past the confirmation of that list.
+        let untracked_paths = read_untracked_paths(&root, &temporary_index)?;
         let status = git_with_index(&root, &temporary_index)
-            .args(["add", "--all"])
+            .args(["add", "--update"])
             .status()?;
         if !status.success() {
             bail!("git add failed with status {status}");
         }
+        if !untracked_paths.is_empty() {
+            add_literal_paths(&root, &temporary_index, &untracked_paths)?;
+        }
+        untracked = untracked_paths
+            .iter()
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect();
     }
 
     let output = git_with_index(&root, &temporary_index)
@@ -71,7 +84,52 @@ pub(crate) fn review_changes(
         );
     }
 
-    Ok(ReviewedChanges { diff, tree })
+    Ok(ReviewedChanges {
+        diff,
+        tree,
+        untracked,
+    })
+}
+
+/// Lists the untracked files that are not ignored, as raw paths relative to `root`.
+fn read_untracked_paths(root: &Path, index: &Path) -> anyhow::Result<Vec<Vec<u8>>> {
+    let output = git_with_index(root, index)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git ls-files failed: {}", stderr);
+    }
+
+    Ok(output
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+
+/// Adds `paths` to `index`, matching each one literally rather than as a pathspec pattern.
+fn add_literal_paths(root: &Path, index: &Path, paths: &[Vec<u8>]) -> anyhow::Result<()> {
+    let mut child = git_with_index(root, index)
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .args(["add", "--pathspec-from-file=-", "--pathspec-file-nul"])
+        .stdin(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().context("git add has no stdin")?;
+    let written = paths.iter().try_for_each(|path| {
+        stdin.write_all(path)?;
+        stdin.write_all(b"\0")
+    });
+    // Closed before waiting, so that git sees the end of the list.
+    drop(stdin);
+    let status = child.wait()?;
+    written.context("failed to pass the untracked files to git add")?;
+    if !status.success() {
+        bail!("git add failed with status {status}");
+    }
+    Ok(())
 }
 
 fn git_with_index(root: &Path, index: &Path) -> Command {
@@ -347,7 +405,6 @@ pub(crate) fn edit_commit_message(file: &NamedTempFile) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::process::Stdio;
     use std::sync::{Mutex, OnceLock};
 
     fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -435,7 +492,7 @@ mod tests {
         fs::create_dir(repo.path().join("sub")).unwrap();
         fs::write(repo.path().join("root.txt"), "reviewed\n").unwrap();
         let _cwd = CwdGuard::enter(&repo.path().join("sub"));
-        let ReviewedChanges { diff, tree } = review_changes(false, &[]).unwrap();
+        let ReviewedChanges { diff, tree, .. } = review_changes(false, &[]).unwrap();
         assert!(diff.contains("+reviewed"));
         fs::write(repo.path().join("root.txt"), "later\n").unwrap();
         apply_tree(&tree).unwrap();
@@ -471,7 +528,7 @@ mod tests {
         );
         fs::write(linked.join("file.txt"), "after\n").unwrap();
         let _cwd = CwdGuard::enter(&linked);
-        let ReviewedChanges { diff, tree } = review_changes(false, &[]).unwrap();
+        let ReviewedChanges { diff, tree, .. } = review_changes(false, &[]).unwrap();
         assert!(diff.contains("+after"));
         apply_tree(&tree).unwrap();
         commit(&save_buffer_to_tempfile(b"test: linked").unwrap()).unwrap();
@@ -485,7 +542,7 @@ mod tests {
         fs::write(repo.path().join("file.txt"), "reviewed\n").unwrap();
         git(repo.path(), &["add", "file.txt"]);
         let _cwd = CwdGuard::enter(repo.path());
-        let ReviewedChanges { diff, tree } = review_changes(true, &[]).unwrap();
+        let ReviewedChanges { diff, tree, .. } = review_changes(true, &[]).unwrap();
         assert!(diff.contains("+reviewed"));
         fs::write(repo.path().join("file.txt"), "later\n").unwrap();
         git(repo.path(), &["add", "file.txt"]);
@@ -517,7 +574,7 @@ mod tests {
         // The flag must survive the first commit to protect the second one.
         for content in ["2\n", "3\n"] {
             fs::write(repo.path().join("file.txt"), content).unwrap();
-            let ReviewedChanges { diff, tree } = review_changes(false, &[]).unwrap();
+            let ReviewedChanges { diff, tree, .. } = review_changes(false, &[]).unwrap();
             assert!(!diff.contains("local only"));
             apply_tree(&tree).unwrap();
             commit(&save_buffer_to_tempfile(b"test: skip worktree").unwrap()).unwrap();
@@ -783,6 +840,58 @@ mod tests {
         assert!(!repo.path().join(".git/index").exists());
         assert!(!repo.path().join(".git/index.lock").exists());
         assert_eq!(porcelain_status(), "?? file.txt\n");
+    }
+
+    #[test]
+    fn review_lists_only_new_unignored_files() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::write(repo.path().join("tracked.txt"), "1\n").unwrap();
+        fs::write(repo.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        fs::write(repo.path().join("tracked.txt"), "2\n").unwrap();
+        fs::write(repo.path().join("ignored.txt"), "ignored\n").unwrap();
+        fs::create_dir(repo.path().join("sub")).unwrap();
+        fs::write(repo.path().join("sub/new.txt"), "new\n").unwrap();
+        let _cwd = CwdGuard::enter(&repo.path().join("sub"));
+
+        let reviewed = review_changes(false, &[]).unwrap();
+        assert_eq!(reviewed.untracked, ["sub/new.txt"]);
+        assert!(
+            reviewed.diff.contains("+new"),
+            "diff was {:?}",
+            reviewed.diff
+        );
+        assert!(
+            !reviewed.diff.contains("ignored"),
+            "diff was {:?}",
+            reviewed.diff
+        );
+
+        git(repo.path(), &["add", "tracked.txt"]);
+        assert!(review_changes(true, &[]).unwrap().untracked.is_empty());
+    }
+
+    #[test]
+    fn untracked_paths_are_added_literally() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        // `*` would match both files as a pathspec, and `:` would start magic.
+        for name in ["a *.txt", ":(exclude)b.txt"] {
+            fs::write(repo.path().join(name), "new\n").unwrap();
+        }
+        let _cwd = CwdGuard::enter(repo.path());
+
+        let reviewed = review_changes(false, &[]).unwrap();
+        assert_eq!(reviewed.untracked, [":(exclude)b.txt", "a *.txt"]);
+        let output = Command::new("git")
+            .args(["ls-tree", "--name-only", "-z", &reviewed.tree])
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, b":(exclude)b.txt\0a *.txt\0");
     }
 
     fn quiet(program: &str, args: &[&str]) -> Command {
