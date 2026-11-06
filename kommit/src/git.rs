@@ -162,37 +162,39 @@ pub(crate) fn get_current_branch() -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub(crate) fn apply_tree(tree: &str) -> anyhow::Result<()> {
-    // `--reset` keeps per-entry flags such as skip-worktree and assume-unchanged.
-    let status = Command::new("git")
-        .args(["read-tree", "--reset", tree])
-        .status()?;
+/// Runs `command` with inherited stdio and fails if it exits unsuccessfully.
+/// The command's own stderr has already reached the terminal, so the returned
+/// error only names the command and its exit status.
+fn run_checked(command: &mut Command, name: &str) -> anyhow::Result<()> {
+    let status = command
+        .status()
+        .with_context(|| format!("Failed to execute {name}"))?;
     if !status.success() {
-        bail!("git read-tree failed with status {status}");
+        bail!("{name} failed: {status}");
     }
     Ok(())
+}
+
+pub(crate) fn apply_tree(tree: &str) -> anyhow::Result<()> {
+    // `--reset` keeps per-entry flags such as skip-worktree and assume-unchanged.
+    run_checked(
+        Command::new("git").args(["read-tree", "--reset", tree]),
+        "git read-tree",
+    )
 }
 
 pub(crate) fn commit(file: &NamedTempFile) -> anyhow::Result<()> {
     info!(file = %file.path().display(), "Committing with message");
 
-    let status = Command::new("git")
-        .args(["commit", "-F"])
-        .arg(file.path())
-        .status()?;
-    if !status.success() {
-        bail!("git commit failed with status {status}");
-    }
-    Ok(())
+    run_checked(
+        Command::new("git").args(["commit", "-F"]).arg(file.path()),
+        "git commit",
+    )
 }
 
 pub(crate) fn push() -> anyhow::Result<()> {
     info!("Pushing");
-    let status = Command::new("git").args(["push"]).status()?;
-    if !status.success() {
-        bail!("git push failed with status {status}");
-    }
-    Ok(())
+    run_checked(Command::new("git").args(["push"]), "git push")
 }
 
 pub(crate) fn save_buffer_to_tempfile(buffer: &[u8]) -> anyhow::Result<NamedTempFile> {
@@ -234,6 +236,7 @@ pub(crate) fn edit_commit_message(file: &NamedTempFile) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Stdio;
     use std::sync::{Mutex, OnceLock};
 
     fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -579,5 +582,41 @@ mod tests {
         let diff = review_changes(false, &[]).unwrap().diff;
 
         assert!(diff.contains("+reviewed"), "diff was {diff:?}");
+    }
+
+    fn quiet(program: &str, args: &[&str]) -> Command {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[test]
+    fn test_run_checked_success() {
+        assert!(run_checked(&mut quiet("git", &["--version"]), "git version").is_ok());
+    }
+
+    #[test]
+    fn test_run_checked_non_zero_exit() {
+        let err = run_checked(
+            &mut quiet("git", &["definitely-not-a-command"]),
+            "git definitely-not-a-command",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("git definitely-not-a-command failed"), "{err}");
+        assert!(err.contains("exit status"), "{err}");
+    }
+
+    #[test]
+    fn test_run_checked_missing_binary() {
+        let err = run_checked(&mut quiet("definitely-not-a-binary", &[]), "missing")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Failed to execute missing"), "{err}");
     }
 }

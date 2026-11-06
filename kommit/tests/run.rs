@@ -138,14 +138,17 @@ impl TestRepo {
     }
 
     fn kommit_in(&self, relative_cwd: &str, args: &[&str]) -> Output {
+        self.kommit_command(relative_cwd, args).output().unwrap()
+    }
+
+    fn kommit_command(&self, relative_cwd: &str, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_kommit"));
         self.isolate(&mut command, &self.path(relative_cwd));
         command
             .args(["run", "--host", "127.0.0.1", "--port"])
             .arg(self.llm.port.to_string())
-            .args(args)
-            .output()
-            .unwrap()
+            .args(args);
+        command
     }
 
     fn kommit(&self, args: &[&str]) -> Output {
@@ -168,6 +171,28 @@ impl TestRepo {
 
     fn head(&self) -> String {
         self.git(&["rev-parse", "HEAD"])
+    }
+
+    /// Installs a `pre-commit` hook that rejects every commit.
+    fn reject_commits(&self) {
+        self.write(".git/hooks/pre-commit", "#!/bin/sh\nexit 1\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let hook = self.path(".git/hooks/pre-commit");
+            fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// Adds a bare repository as `origin` and pushes the current branch to it.
+    /// The returned directory must outlive the remote's use.
+    fn add_remote(&self) -> TempDir {
+        let remote = tempfile::tempdir().unwrap();
+        let path = remote.path().to_str().unwrap();
+        self.git(&["init", "--quiet", "--bare", path]);
+        self.git(&["remote", "add", "origin", path]);
+        self.git(&["push", "--quiet", "--set-upstream", "origin", "HEAD"]);
+        remote
     }
 
     /// Stages `tracked.txt`, then leaves a different unstaged edit and a new file.
@@ -321,4 +346,79 @@ fn only_excluded_changes_stop_before_the_llm() {
         assert_eq!(repo.status(), status, "{flags:?}");
         assert_eq!(repo.head(), head, "{flags:?}");
     }
+}
+
+const UNUSED_MESSAGE_NOTICE: &str = "The commit was not created. Commit message:";
+
+#[test]
+fn rejected_commit_prints_the_message_and_skips_push() {
+    let repo = TestRepo::with_commit();
+    let _remote = repo.add_remote();
+    // An unpushed commit, so that a stray push would move the remote ref.
+    repo.write("other/file.txt", "unpushed\n");
+    repo.git(&["commit", "--quiet", "--all", "-m", "unpushed"]);
+    repo.write("tracked.txt", "changed\n");
+    repo.reject_commits();
+    let head = repo.head();
+    let remote_refs = repo.git(&["ls-remote", "origin"]);
+
+    let output = repo.kommit(&["--commit", "--push"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
+    assert!(
+        stderr.contains(UNUSED_MESSAGE_NOTICE),
+        "stderr was {stderr}"
+    );
+    assert!(stderr.contains(COMMIT_MESSAGE), "stderr was {stderr}");
+    assert!(stderr.contains("git commit failed"), "stderr was {stderr}");
+    assert_eq!(repo.head(), head);
+    assert_eq!(repo.git(&["ls-remote", "origin"]), remote_refs);
+}
+
+// The fake editor is a shell script.
+#[cfg(unix)]
+#[test]
+fn rejected_commit_prints_the_edited_message() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    repo.reject_commits();
+    let editor = repo.home.path().join("editor.sh");
+    fs::write(&editor, "printf 'fix: edited message\\n' > \"$1\"\n").unwrap();
+
+    let output = repo
+        .kommit_command("", &["--commit", "--edit"])
+        .env("VISUAL", format!("sh {}", editor.display()))
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
+    assert!(
+        stderr.contains("fix: edited message"),
+        "stderr was {stderr}"
+    );
+    assert!(!stderr.contains(COMMIT_MESSAGE), "stderr was {stderr}");
+}
+
+#[test]
+fn failed_push_keeps_the_commit_and_does_not_print_the_message() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    let head = repo.head();
+
+    let output = repo.kommit(&["--push"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
+    assert!(stderr.contains("git push failed"), "stderr was {stderr}");
+    assert!(
+        !stderr.contains(UNUSED_MESSAGE_NOTICE),
+        "stderr was {stderr}"
+    );
+    assert_ne!(repo.head(), head);
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%s"]),
+        format!("{COMMIT_MESSAGE}\n")
+    );
 }
