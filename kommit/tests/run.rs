@@ -169,6 +169,17 @@ impl TestRepo {
         self.git(&["status", "--porcelain"])
     }
 
+    /// Runs `kommit` with an editor script that receives the message file as `$1`.
+    #[cfg(unix)]
+    fn kommit_with_editor(&self, script: &[u8], args: &[&str]) -> Output {
+        let editor = self.home.path().join("editor.sh");
+        fs::write(&editor, script).unwrap();
+        self.kommit_command("", args)
+            .env("VISUAL", format!("sh {}", editor.display()))
+            .output()
+            .unwrap()
+    }
+
     fn head(&self) -> String {
         self.git(&["rev-parse", "HEAD"])
     }
@@ -348,7 +359,10 @@ fn only_excluded_changes_stop_before_the_llm() {
     }
 }
 
-const UNUSED_MESSAGE_NOTICE: &str = "The commit was not created. Commit message:";
+/// The start of every notice that reprints an unused commit message.
+const UNUSED_MESSAGE_NOTICE: &str = "The commit was not created";
+const RESTORED_NOTICE: &str =
+    "The commit was not created and the staging area was restored. Commit message:";
 
 #[test]
 fn rejected_commit_prints_the_message_and_skips_push() {
@@ -421,4 +435,114 @@ fn failed_push_keeps_the_commit_and_does_not_print_the_message() {
         repo.git(&["log", "-1", "--format=%s"]),
         format!("{COMMIT_MESSAGE}\n")
     );
+}
+
+#[test]
+fn rejected_commit_restores_the_index() {
+    let repo = TestRepo::with_commit();
+    repo.make_mixed_changes();
+    repo.reject_commits();
+    let status = repo.status();
+    assert_eq!(status, " M other/file.txt\nM  tracked.txt\n?? new.txt\n");
+    let head = repo.head();
+
+    let output = repo.kommit(&["--commit"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
+    assert!(stderr.contains(RESTORED_NOTICE), "stderr was {stderr}");
+    assert_eq!(repo.status(), status);
+    assert_eq!(repo.head(), head);
+}
+
+#[test]
+fn rejected_staged_commit_restores_the_index() {
+    let repo = TestRepo::with_commit();
+    repo.make_mixed_changes();
+    // Partially staged, so that the index differs from both HEAD and the work tree.
+    repo.write("tracked.txt", "unstaged on top\n");
+    repo.reject_commits();
+    let status = repo.status();
+    assert!(status.contains("MM tracked.txt"), "status was {status}");
+
+    let output = repo.kommit(&["--staged", "--commit"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
+    assert_eq!(repo.status(), status);
+    assert_eq!(repo.git(&["show", ":tracked.txt"]), "staged line\n");
+}
+
+#[test]
+fn rejected_first_commit_leaves_no_index() {
+    let repo = TestRepo::new();
+    repo.write("new.txt", "new file line\n");
+    repo.reject_commits();
+    assert!(!repo.path(".git/index").exists());
+
+    let output = repo.kommit(&["--commit"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
+    assert!(stderr.contains(RESTORED_NOTICE), "stderr was {stderr}");
+    assert!(!repo.path(".git/index").exists());
+    assert!(!repo.path(".git/index.lock").exists());
+    assert_eq!(repo.status(), "?? new.txt\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_editor_prints_the_edited_message() {
+    let repo = TestRepo::with_commit();
+    repo.make_mixed_changes();
+    let status = repo.status();
+    let head = repo.head();
+
+    let output = repo.kommit_with_editor(
+        b"printf 'fix: edited before failing\\n' > \"$1\"\nexit 1\n",
+        &["--commit", "--edit"],
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
+    assert!(
+        stderr.contains("The commit was not created. Commit message:"),
+        "stderr was {stderr}"
+    );
+    assert!(
+        stderr.contains("fix: edited before failing"),
+        "stderr was {stderr}"
+    );
+    assert!(
+        stderr.contains("Failed to edit commit message"),
+        "stderr was {stderr}"
+    );
+    assert_eq!(repo.status(), status);
+    assert_eq!(repo.head(), head);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejected_commit_prints_non_utf8_message_as_is() {
+    // "fix: 수정" in EUC-KR.
+    const EUC_KR: &[u8] = b"fix: \xbc\xf6\xc1\xa4";
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    repo.reject_commits();
+
+    let output = repo.kommit_with_editor(
+        b"printf 'fix: \\274\\366\\301\\244\\n' > \"$1\"\n",
+        &["--commit", "--edit"],
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
+    assert!(
+        output
+            .stderr
+            .windows(EUC_KR.len())
+            .any(|window| window == EUC_KR),
+        "stderr was {stderr}"
+    );
+    assert!(!stderr.contains(COMMIT_MESSAGE), "stderr was {stderr}");
 }

@@ -2,7 +2,7 @@ use anyhow::{Context, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 use tracing::info;
 
 /// How many excluded files to name before summarizing the rest as a count.
@@ -173,6 +173,85 @@ fn run_checked(command: &mut Command, name: &str) -> anyhow::Result<()> {
         bail!("{name} failed: {status}");
     }
     Ok(())
+}
+
+/// A copy of the real index taken before it is overwritten, so that a failed commit
+/// can put the staging area back exactly as it was, per-entry flags included.
+pub(crate) struct IndexBackup {
+    index: PathBuf,
+    /// `None` when there was no index yet, as in a fresh repository.
+    saved: Option<TempDir>,
+    head: Option<String>,
+}
+
+impl IndexBackup {
+    pub(crate) fn save() -> anyhow::Result<Self> {
+        let index = std::path::absolute(git_path(&["rev-parse", "--git-path", "index"])?)?;
+        let saved = if index.exists() {
+            let dir = tempfile::tempdir()?;
+            std::fs::copy(&index, dir.path().join("index"))
+                .with_context(|| format!("failed to copy {}", index.display()))?;
+            Some(dir)
+        } else {
+            None
+        };
+        let head = read_head()?;
+        Ok(Self { index, saved, head })
+    }
+
+    /// Whether a commit was created since the backup, in which case restoring
+    /// the old index would put it out of step with the new HEAD.
+    pub(crate) fn head_moved(&self) -> anyhow::Result<bool> {
+        Ok(read_head()? != self.head)
+    }
+
+    /// Puts the saved index back, taking `index.lock` like git does so that it
+    /// never overwrites an index another git process is writing.
+    pub(crate) fn restore(self) -> anyhow::Result<()> {
+        let mut lock = self.index.clone().into_os_string();
+        lock.push(".lock");
+        let lock = PathBuf::from(lock);
+        let mut lock_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+            .with_context(|| format!("failed to lock {}", self.index.display()))?;
+
+        let result = match &self.saved {
+            Some(dir) => std::fs::read(dir.path().join("index"))
+                .and_then(|content| lock_file.write_all(&content))
+                .and_then(|()| lock_file.sync_all())
+                .and_then(|()| {
+                    // Closed first, because Windows may refuse to rename an open file.
+                    drop(lock_file);
+                    std::fs::rename(&lock, &self.index)
+                }),
+            None => {
+                drop(lock_file);
+                match std::fs::remove_file(&self.index) {
+                    Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
+                    _ => Ok(()),
+                }
+            }
+        };
+        // After a successful rename the lock is already gone.
+        if self.saved.is_none() || result.is_err() {
+            let _ = std::fs::remove_file(&lock);
+        }
+        result.with_context(|| format!("failed to restore {}", self.index.display()))
+    }
+}
+
+fn read_head() -> anyhow::Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .output()
+        .context("Failed to execute git rev-parse")?;
+    // `--quiet` makes an unborn HEAD exit with 1 and print nothing.
+    Ok(output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
 pub(crate) fn apply_tree(tree: &str) -> anyhow::Result<()> {
@@ -582,6 +661,89 @@ mod tests {
         let diff = review_changes(false, &[]).unwrap().diff;
 
         assert!(diff.contains("+reviewed"), "diff was {diff:?}");
+    }
+
+    fn ls_files_tags() -> String {
+        let output = Command::new("git")
+            .args(["ls-files", "-t"])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn restore_keeps_skip_worktree_and_partial_staging() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::write(repo.path().join("local.txt"), "shared\n").unwrap();
+        fs::write(repo.path().join("file.txt"), "1\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        git(
+            repo.path(),
+            &["update-index", "--skip-worktree", "local.txt"],
+        );
+        fs::write(repo.path().join("file.txt"), "2\n").unwrap();
+        git(repo.path(), &["add", "file.txt"]);
+        fs::write(repo.path().join("file.txt"), "3\n").unwrap();
+        fs::write(repo.path().join("new.txt"), "new\n").unwrap();
+        let _cwd = CwdGuard::enter(repo.path());
+        let status = porcelain_status();
+        let tags = ls_files_tags();
+        assert!(tags.contains("S local.txt"), "tags were {tags:?}");
+
+        let backup = IndexBackup::save().unwrap();
+        let tree = review_changes(false, &[]).unwrap().tree;
+        // Without `--reset`, so that the flag would be lost if it were not restored.
+        git(repo.path(), &["read-tree", &tree]);
+        assert_ne!(porcelain_status(), status);
+        assert!(!backup.head_moved().unwrap());
+        backup.restore().unwrap();
+
+        assert_eq!(porcelain_status(), status);
+        assert_eq!(ls_files_tags(), tags);
+        assert!(!repo.path().join(".git/index.lock").exists());
+    }
+
+    #[test]
+    fn restore_refuses_to_break_an_existing_lock() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::write(repo.path().join("file.txt"), "1\n").unwrap();
+        git(repo.path(), &["add", "file.txt"]);
+        let _cwd = CwdGuard::enter(repo.path());
+
+        let backup = IndexBackup::save().unwrap();
+        git(repo.path(), &["rm", "--quiet", "--cached", "file.txt"]);
+        let index = fs::read(repo.path().join(".git/index")).unwrap();
+        fs::write(repo.path().join(".git/index.lock"), "held").unwrap();
+
+        assert!(backup.restore().is_err());
+        assert_eq!(fs::read(repo.path().join(".git/index")).unwrap(), index);
+        assert_eq!(
+            fs::read(repo.path().join(".git/index.lock")).unwrap(),
+            b"held"
+        );
+    }
+
+    #[test]
+    fn restore_removes_an_index_that_did_not_exist() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::write(repo.path().join("file.txt"), "1\n").unwrap();
+        let _cwd = CwdGuard::enter(repo.path());
+        assert!(!repo.path().join(".git/index").exists());
+
+        let backup = IndexBackup::save().unwrap();
+        git(repo.path(), &["add", "file.txt"]);
+        backup.restore().unwrap();
+
+        assert!(!repo.path().join(".git/index").exists());
+        assert!(!repo.path().join(".git/index.lock").exists());
+        assert_eq!(porcelain_status(), "?? file.txt\n");
     }
 
     fn quiet(program: &str, args: &[&str]) -> Command {
