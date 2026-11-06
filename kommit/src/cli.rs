@@ -62,6 +62,10 @@ pub(crate) struct RunArgs {
     /// Edit the generated commit message before committing
     #[arg(short, long)]
     pub(crate) edit: bool,
+
+    /// Include untracked files without asking for confirmation
+    #[arg(short, long)]
+    pub(crate) yes: bool,
 }
 
 #[derive(ClapArgs, Debug)]

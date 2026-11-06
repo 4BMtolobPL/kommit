@@ -239,7 +239,7 @@ fn plain_run_reviews_every_change_and_changes_nothing() {
     let status = repo.status();
     let head = repo.head();
 
-    let prompt = repo.run_ok(&[]);
+    let prompt = repo.run_ok(&["--yes"]);
 
     assert!(prompt.contains("+staged line"), "prompt was {prompt}");
     assert!(prompt.contains("+unstaged line"), "prompt was {prompt}");
@@ -265,7 +265,7 @@ fn plain_run_reviews_only_new_files() {
     let repo = TestRepo::with_commit();
     repo.write("new.txt", "new file line\n");
 
-    let prompt = repo.run_ok(&[]);
+    let prompt = repo.run_ok(&["--yes"]);
 
     assert!(prompt.contains("+new file line"), "prompt was {prompt}");
     assert_eq!(repo.status(), "?? new.txt\n");
@@ -276,7 +276,7 @@ fn plain_run_works_before_the_first_commit() {
     let repo = TestRepo::new();
     repo.write("new.txt", "new file line\n");
 
-    let prompt = repo.run_ok(&[]);
+    let prompt = repo.run_ok(&["--yes"]);
 
     assert!(prompt.contains("+new file line"), "prompt was {prompt}");
     assert_eq!(repo.status(), "?? new.txt\n");
@@ -290,7 +290,7 @@ fn runs_from_a_subdirectory_review_the_whole_repository() {
     repo.write("tracked.txt", "staged line\n");
     repo.git(&["add", "tracked.txt"]);
 
-    let plain = repo.run_ok_in("sub", &[]);
+    let plain = repo.run_ok_in("sub", &["--yes"]);
     assert!(plain.contains("+staged line"), "prompt was {plain}");
     assert!(plain.contains("+unstaged line"), "prompt was {plain}");
     assert!(plain.contains("+here"), "prompt was {plain}");
@@ -305,8 +305,8 @@ fn plain_run_previews_the_prompt_of_commit() {
     let repo = TestRepo::with_commit();
     repo.make_mixed_changes();
 
-    let preview = repo.run_ok(&[]);
-    let committed = repo.run_ok(&["--commit"]);
+    let preview = repo.run_ok(&["--yes"]);
+    let committed = repo.run_ok(&["--yes", "--commit"]);
 
     assert_eq!(preview, committed);
 }
@@ -316,7 +316,7 @@ fn commit_includes_every_change() {
     let repo = TestRepo::with_commit();
     repo.make_mixed_changes();
 
-    repo.run_ok(&["--commit"]);
+    repo.run_ok(&["--yes", "--commit"]);
 
     assert_eq!(repo.git(&["show", "HEAD:tracked.txt"]), "staged line\n");
     assert_eq!(
@@ -496,7 +496,7 @@ fn rejected_commit_restores_the_index() {
     assert_eq!(status, " M other/file.txt\nM  tracked.txt\n?? new.txt\n");
     let head = repo.head();
 
-    let output = repo.kommit(&["--commit"]);
+    let output = repo.kommit(&["--yes", "--commit"]);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
@@ -530,7 +530,7 @@ fn rejected_first_commit_leaves_no_index() {
     repo.reject_commits();
     assert!(!repo.path(".git/index").exists());
 
-    let output = repo.kommit(&["--commit"]);
+    let output = repo.kommit(&["--yes", "--commit"]);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "stderr was {stderr}");
@@ -550,7 +550,7 @@ fn failed_editor_prints_the_edited_message() {
 
     let output = repo.kommit_with_editor(
         b"printf 'fix: edited before failing\\n' > \"$1\"\nexit 1\n",
-        &["--commit", "--edit"],
+        &["--yes", "--commit", "--edit"],
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -595,4 +595,91 @@ fn rejected_commit_prints_non_utf8_message_as_is() {
         "stderr was {stderr}"
     );
     assert!(!stderr.contains(COMMIT_MESSAGE), "stderr was {stderr}");
+}
+
+#[test]
+fn untracked_files_without_a_terminal_stop_before_the_llm() {
+    let repo = TestRepo::with_commit();
+    let _remote = repo.add_remote();
+    repo.write("tracked.txt", "changed\n");
+    repo.write(".env", "API_KEY=secret\n");
+    let status = repo.status();
+    let head = repo.head();
+    let remote_refs = repo.git(&["ls-remote", "origin"]);
+
+    let flag_sets: [&[&str]; 3] = [&[], &["--commit"], &["--push"]];
+    for flags in flag_sets {
+        let output = repo.kommit(flags);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{flags:?}: stderr was {stderr}"
+        );
+        assert!(stderr.contains(".env"), "{flags:?}: stderr was {stderr}");
+        assert!(stderr.contains("--yes"), "{flags:?}: stderr was {stderr}");
+        assert_eq!(repo.llm.prompts(), Vec::<String>::new(), "{flags:?}");
+        assert_eq!(repo.status(), status, "{flags:?}");
+        assert_eq!(repo.head(), head, "{flags:?}");
+        assert_eq!(repo.git(&["ls-remote", "origin"]), remote_refs, "{flags:?}");
+    }
+}
+
+#[test]
+fn yes_includes_untracked_files() {
+    let repo = TestRepo::with_commit();
+    repo.write(".env", "API_KEY=secret\n");
+
+    let prompt = repo.run_ok(&["--yes", "--commit"]);
+
+    assert!(prompt.contains("+API_KEY=secret"), "prompt was {prompt}");
+    assert_eq!(repo.git(&["show", "HEAD:.env"]), "API_KEY=secret\n");
+    assert_eq!(repo.status(), "");
+}
+
+#[test]
+fn staged_run_does_not_ask_about_untracked_files() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "staged line\n");
+    repo.git(&["add", "tracked.txt"]);
+    repo.write(".env", "API_KEY=secret\n");
+
+    let prompt = repo.run_ok(&["--staged", "--commit"]);
+
+    assert!(prompt.contains("+staged line"), "prompt was {prompt}");
+    assert!(!prompt.contains("API_KEY"), "prompt was {prompt}");
+    assert_eq!(repo.status(), "?? .env\n");
+}
+
+#[test]
+fn untracked_files_with_pathspec_characters_are_committed_literally() {
+    let repo = TestRepo::with_commit();
+    repo.write("a *.txt", "star\n");
+    repo.write(":(exclude)b.txt", "magic\n");
+
+    let prompt = repo.run_ok(&["--yes", "--commit"]);
+
+    assert!(prompt.contains("+star"), "prompt was {prompt}");
+    assert!(prompt.contains("+magic"), "prompt was {prompt}");
+    assert_eq!(repo.git(&["show", "HEAD:a *.txt"]), "star\n");
+    assert_eq!(repo.git(&["show", "HEAD::(exclude)b.txt"]), "magic\n");
+    assert_eq!(repo.status(), "");
+}
+
+#[test]
+fn untracked_files_are_committed_despite_global_pathspec_settings() {
+    for variable in ["GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"] {
+        let repo = TestRepo::with_commit();
+        repo.write("new.txt", "new file line\n");
+
+        let output = repo
+            .kommit_command("", &["--yes", "--commit"])
+            .env(variable, "1")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{variable}: {output:?}");
+        assert_eq!(repo.git(&["show", "HEAD:new.txt"]), "new file line\n");
+    }
 }
