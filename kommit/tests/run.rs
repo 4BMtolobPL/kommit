@@ -213,6 +213,23 @@ impl TestRepo {
         self.write("other/file.txt", "unstaged line\n");
         self.write("new.txt", "new file line\n");
     }
+
+    /// Commits different `tracked.txt` contents on two branches and leaves their merge conflicted.
+    fn make_conflict(&self) {
+        self.git(&["checkout", "--quiet", "-b", "theirs"]);
+        self.write("tracked.txt", "theirs\n");
+        self.git(&["commit", "--quiet", "--all", "-m", "theirs"]);
+        self.git(&["checkout", "--quiet", "-"]);
+        self.write("tracked.txt", "ours\n");
+        self.git(&["commit", "--quiet", "--all", "-m", "ours"]);
+        let mut merge = Command::new("git");
+        self.isolate(&mut merge, self.repo.path());
+        let output = merge.args(["merge", "--quiet", "theirs"]).output().unwrap();
+        assert!(
+            !output.status.success(),
+            "merge should conflict: {output:?}"
+        );
+    }
 }
 
 #[test]
@@ -356,6 +373,39 @@ fn only_excluded_changes_stop_before_the_llm() {
         assert_eq!(repo.llm.prompts(), Vec::<String>::new(), "{flags:?}");
         assert_eq!(repo.status(), status, "{flags:?}");
         assert_eq!(repo.head(), head, "{flags:?}");
+    }
+}
+
+#[test]
+fn unresolved_conflicts_stop_before_the_llm() {
+    let repo = TestRepo::with_commit();
+    repo.make_conflict();
+    let status = repo.status();
+    let head = repo.head();
+    let unmerged = repo.git(&["ls-files", "--unmerged"]);
+    assert!(status.contains("UU tracked.txt"), "status was {status}");
+
+    let flag_sets: [&[&str]; 5] = [
+        &[],
+        &["--staged"],
+        &["--commit"],
+        &["--staged", "--commit"],
+        &["--push"],
+    ];
+    for flags in flag_sets {
+        let output = repo.kommit(flags);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{flags:?} should fail");
+        assert!(
+            stderr.contains("Unresolved merge conflicts: tracked.txt."),
+            "{flags:?}: stderr was {stderr}"
+        );
+        assert_eq!(repo.llm.prompts(), Vec::<String>::new(), "{flags:?}");
+        assert_eq!(repo.status(), status, "{flags:?}");
+        assert_eq!(repo.head(), head, "{flags:?}");
+        assert_eq!(repo.git(&["ls-files", "--unmerged"]), unmerged, "{flags:?}");
+        assert!(repo.path(".git/MERGE_HEAD").exists(), "{flags:?}");
     }
 }
 
