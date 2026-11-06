@@ -30,6 +30,15 @@ pub(crate) fn review_changes(
             .with_context(|| format!("failed to copy {}", index.display()))?;
     }
 
+    // Before `git add`, which would stage the conflict markers as if they resolved the conflict.
+    let conflicted = read_unmerged_file_names(&root, &temporary_index)?;
+    if !conflicted.is_empty() {
+        bail!(
+            "Unresolved merge conflicts: {}. Resolve them and stage the result with git add first.",
+            summarize_file_names(&conflicted)
+        );
+    }
+
     if !staged {
         let status = git_with_index(&root, &temporary_index)
             .args(["add", "--all"])
@@ -39,7 +48,6 @@ pub(crate) fn review_changes(
         }
     }
 
-    // Before reading the diff, so that unresolved conflicts are reported as such.
     let output = git_with_index(&root, &temporary_index)
         .arg("write-tree")
         .output()?;
@@ -138,6 +146,30 @@ fn read_staged_file_names(root: &Path, index: &Path) -> anyhow::Result<Vec<Strin
         .filter(|name| !name.is_empty())
         .map(|name| String::from_utf8_lossy(name).into_owned())
         .collect())
+}
+
+/// Lists the paths with unmerged entries, each once, in index order.
+fn read_unmerged_file_names(root: &Path, index: &Path) -> anyhow::Result<Vec<String>> {
+    let output = git_with_index(root, index)
+        .args(["ls-files", "--unmerged", "-z"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git ls-files failed: {}", stderr);
+    }
+
+    // Each record is `<mode> <object> <stage>\t<path>`, repeated for every stage of a path.
+    let mut names: Vec<String> = output
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter_map(|record| {
+            let tab = record.iter().position(|&byte| byte == b'\t')?;
+            Some(String::from_utf8_lossy(&record[tab + 1..]).into_owned())
+        })
+        .collect();
+    names.dedup();
+    Ok(names)
 }
 
 fn summarize_file_names(names: &[String]) -> String {
@@ -609,37 +641,44 @@ mod tests {
         }
     }
 
+    /// Commits different contents of `file` on two branches and leaves their merge conflicted.
+    fn make_conflict(repo: &Path, file: &str) {
+        fs::write(repo.join(file), "base\n").unwrap();
+        git(repo, &["add", file]);
+        git(repo, &["commit", "--quiet", "-m", "base"]);
+        git(repo, &["checkout", "--quiet", "-b", "theirs"]);
+        fs::write(repo.join(file), "theirs\n").unwrap();
+        git(repo, &["commit", "--quiet", "-am", "theirs"]);
+        git(repo, &["checkout", "--quiet", "-"]);
+        fs::write(repo.join(file), "ours\n").unwrap();
+        git(repo, &["commit", "--quiet", "-am", "ours"]);
+        let merge = Command::new("git")
+            .current_dir(repo)
+            .args(["merge", "--quiet", "theirs"])
+            .output()
+            .unwrap();
+        assert!(!merge.status.success());
+    }
+
     #[test]
     fn unresolved_conflict_in_excluded_file_is_reported_as_conflict() {
         let _lock = cwd_lock();
         let repo = tempfile::tempdir().unwrap();
         init(repo.path());
-        fs::write(repo.path().join("Cargo.lock"), "base\n").unwrap();
-        git(repo.path(), &["add", "Cargo.lock"]);
-        git(repo.path(), &["commit", "--quiet", "-m", "base"]);
-        git(repo.path(), &["checkout", "--quiet", "-b", "theirs"]);
-        fs::write(repo.path().join("Cargo.lock"), "theirs\n").unwrap();
-        git(repo.path(), &["commit", "--quiet", "-am", "theirs"]);
-        git(repo.path(), &["checkout", "--quiet", "-"]);
-        fs::write(repo.path().join("Cargo.lock"), "ours\n").unwrap();
-        git(repo.path(), &["commit", "--quiet", "-am", "ours"]);
-        let merge = Command::new("git")
-            .current_dir(repo.path())
-            .args(["merge", "--quiet", "theirs"])
-            .output()
-            .unwrap();
-        assert!(!merge.status.success());
+        make_conflict(repo.path(), "Cargo.lock");
         let _cwd = CwdGuard::enter(repo.path());
 
-        let error = review_changes(true, &lock_patterns())
-            .err()
-            .expect("review should fail")
-            .to_string();
+        for staged in [false, true] {
+            let error = review_changes(staged, &lock_patterns())
+                .err()
+                .expect("review should fail")
+                .to_string();
 
-        assert!(
-            error.contains("git write-tree failed"),
-            "error was {error:?}"
-        );
+            assert!(
+                error.contains("Unresolved merge conflicts: Cargo.lock."),
+                "staged = {staged}: error was {error:?}"
+            );
+        }
     }
 
     // Other Unix file systems, such as APFS, reject paths that are not valid UTF-8.
