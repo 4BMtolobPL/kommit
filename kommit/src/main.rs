@@ -247,11 +247,11 @@ fn confirm_untracked(
     for file in files {
         writeln!(stderr, "  {file}")?;
     }
-    write!(
-        stderr,
-        "Include these {} untracked files? [y/N] ",
-        files.len()
-    )?;
+    let question = match files.len() {
+        1 => "Include this untracked file?".to_owned(),
+        count => format!("Include these {count} untracked files?"),
+    };
+    write!(stderr, "{question} [y/N] ")?;
     stderr.flush()?;
     drop(stderr);
 

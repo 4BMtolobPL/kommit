@@ -113,6 +113,10 @@ fn read_untracked_paths(root: &Path, index: &Path) -> anyhow::Result<Vec<Vec<u8>
 /// Adds `paths` to `index`, matching each one literally rather than as a pathspec pattern.
 fn add_literal_paths(root: &Path, index: &Path, paths: &[Vec<u8>]) -> anyhow::Result<()> {
     let mut child = git_with_index(root, index)
+        // Git refuses to combine literal pathspecs with these, should the user have set them.
+        .env_remove("GIT_GLOB_PATHSPECS")
+        .env_remove("GIT_NOGLOB_PATHSPECS")
+        .env_remove("GIT_ICASE_PATHSPECS")
         .env("GIT_LITERAL_PATHSPECS", "1")
         .args(["add", "--pathspec-from-file=-", "--pathspec-file-nul"])
         .stdin(Stdio::piped())

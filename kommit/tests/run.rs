@@ -666,3 +666,20 @@ fn untracked_files_with_pathspec_characters_are_committed_literally() {
     assert_eq!(repo.git(&["show", "HEAD::(exclude)b.txt"]), "magic\n");
     assert_eq!(repo.status(), "");
 }
+
+#[test]
+fn untracked_files_are_committed_despite_global_pathspec_settings() {
+    for variable in ["GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"] {
+        let repo = TestRepo::with_commit();
+        repo.write("new.txt", "new file line\n");
+
+        let output = repo
+            .kommit_command("", &["--yes", "--commit"])
+            .env(variable, "1")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{variable}: {output:?}");
+        assert_eq!(repo.git(&["show", "HEAD:new.txt"]), "new file line\n");
+    }
+}
