@@ -7,7 +7,7 @@ pub mod provider;
 use crate::cli::{Cli, Commands, ConfigArgs, ConfigItem, ConfigSubcommand, RunArgs};
 use crate::config::Config;
 use crate::git::{
-    apply_tree, commit, edit_commit_message, get_current_branch, push, review_changes,
+    IndexBackup, apply_tree, commit, edit_commit_message, get_current_branch, push, review_changes,
     save_buffer_to_tempfile,
 };
 use crate::prompt::{
@@ -176,17 +176,38 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         let tempfile = save_buffer_to_tempfile(final_message.as_bytes())
             .context("Failed to save buffer to tempfile")?;
 
-        if edit_required {
-            edit_commit_message(&tempfile).context("Failed to edit commit message")?;
+        if edit_required
+            && let Err(err) =
+                edit_commit_message(&tempfile).context("Failed to edit commit message")
+        {
+            // The index has not been touched yet.
+            print_unused_message(&tempfile, &final_message, false);
+            return Err(err);
         }
 
-        let result = (|| {
-            apply_tree(&reviewed.tree)?;
-            commit(&tempfile)
-        })();
+        let backup = IndexBackup::save().context("Failed to back up the index")?;
+        let result = apply_tree(&reviewed.tree).and_then(|()| commit(&tempfile));
 
         if let Err(err) = result {
-            print_unused_message(&tempfile, &final_message);
+            match backup.head_moved() {
+                // The commit exists despite the failure, so the index matches it already.
+                Ok(true) => return Err(err),
+                Ok(false) => {
+                    let restored = match backup.restore() {
+                        Ok(()) => true,
+                        Err(restore_err) => {
+                            eprintln!("Failed to restore the index: {restore_err:#}");
+                            false
+                        }
+                    };
+                    print_unused_message(&tempfile, &final_message, restored);
+                }
+                Err(head_err) => {
+                    eprintln!(
+                        "Failed to check whether the commit was created, so the index was left as is: {head_err:#}"
+                    );
+                }
+            }
             return Err(err);
         }
     }
@@ -200,17 +221,27 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
 /// Prints the message that failed to be committed so the user can reuse it.
 /// The tempfile takes precedence because it holds any edits made by the user,
-/// and it is deleted when the process exits.
-fn print_unused_message(tempfile: &NamedTempFile, fallback: &str) {
-    let edited = std::fs::read_to_string(tempfile.path()).unwrap_or_default();
-    let message = if edited.trim().is_empty() {
-        fallback
+/// and it is deleted when the process exits. Its bytes are printed as they are,
+/// since the user may write in an encoding other than UTF-8.
+fn print_unused_message(tempfile: &NamedTempFile, fallback: &str, index_restored: bool) {
+    let edited = std::fs::read(tempfile.path()).unwrap_or_default();
+    let edited = edited.trim_ascii();
+    let message = if edited.is_empty() {
+        fallback.trim().as_bytes()
     } else {
-        edited.trim()
+        edited
     };
 
-    eprintln!("{}", "The commit was not created. Commit message:".yellow());
-    eprintln!("{message}");
+    let notice = if index_restored {
+        "The commit was not created and the staging area was restored. Commit message:"
+    } else {
+        "The commit was not created. Commit message:"
+    };
+    eprintln!("{}", notice.yellow());
+    let mut stderr = io::stderr().lock();
+    let _ = stderr
+        .write_all(message)
+        .and_then(|()| stderr.write_all(b"\n"));
 }
 
 fn config(args: ConfigArgs) -> anyhow::Result<()> {
