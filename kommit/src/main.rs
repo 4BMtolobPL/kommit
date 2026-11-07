@@ -48,7 +48,7 @@ fn init_tracing() {
 }
 
 async fn run(args: RunArgs) -> anyhow::Result<()> {
-    let config = Config::load();
+    let config = Config::load()?;
     info!(?args, ?config, "Running with merged config");
 
     let provider = args
@@ -294,7 +294,7 @@ fn config(args: ConfigArgs) -> anyhow::Result<()> {
     match args.command {
         ConfigSubcommand::Show => {
             let path = Config::get_config_path();
-            let config = Config::load();
+            let config = Config::load()?;
             println!("----------------------------------------");
             println!(
                 "Config path: {}",
@@ -306,7 +306,7 @@ fn config(args: ConfigArgs) -> anyhow::Result<()> {
             println!("----------------------------------------");
         }
         ConfigSubcommand::Set { item } => {
-            let mut config = Config::load();
+            let mut config = Config::load()?;
             match item {
                 ConfigItem::Model { value } => config.model = Some(value),
                 ConfigItem::Lang { value } => config.lang = Some(value),
