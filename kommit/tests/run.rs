@@ -151,6 +151,40 @@ impl TestRepo {
         command
     }
 
+    /// Runs `kommit config` with `args`.
+    fn kommit_config(&self, args: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kommit"));
+        self.isolate(&mut command, self.repo.path());
+        command.arg("config").args(args).output().unwrap()
+    }
+
+    /// The config file path, as reported by `config show` before any config exists.
+    fn config_path(&self) -> PathBuf {
+        let output = self.kommit_config(&["show"]);
+        assert!(output.status.success(), "config show: {output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let path = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("Config path: "))
+            .unwrap_or_else(|| panic!("no config path in {stdout}"));
+        let path = PathBuf::from(path);
+        assert!(
+            path.starts_with(self.home.path()),
+            "config path {} is outside the test home",
+            path.display()
+        );
+        path
+    }
+
+    /// Writes a config file that sets a valid key and an invalid provider.
+    fn write_broken_config(&self) -> (PathBuf, Vec<u8>) {
+        let path = self.config_path();
+        let content = b"model = \"keep-me\"\nprovider = \"invalid\"\n".to_vec();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &content).unwrap();
+        (path, content)
+    }
+
     fn kommit(&self, args: &[&str]) -> Output {
         self.kommit_in("", args)
     }
@@ -682,4 +716,81 @@ fn untracked_files_are_committed_despite_global_pathspec_settings() {
         assert!(output.status.success(), "{variable}: {output:?}");
         assert_eq!(repo.git(&["show", "HEAD:new.txt"]), "new file line\n");
     }
+}
+
+#[test]
+fn config_set_keeps_a_broken_config_file() {
+    let repo = TestRepo::new();
+    let (path, content) = repo.write_broken_config();
+
+    let output = repo.kommit_config(&["set", "port", "1234"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr was {stderr}");
+    assert!(
+        stderr.contains(&path.display().to_string()),
+        "stderr was {stderr}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), content);
+}
+
+#[test]
+fn config_set_keeps_an_unknown_key() {
+    let repo = TestRepo::new();
+    let path = repo.config_path();
+    let content = b"modle = \"typo\"\n";
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, content).unwrap();
+
+    let output = repo.kommit_config(&["set", "port", "1234"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr was {stderr}");
+    assert!(stderr.contains("modle"), "stderr was {stderr}");
+    assert_eq!(fs::read(&path).unwrap(), content);
+}
+
+#[test]
+fn config_show_reports_a_broken_config_file() {
+    let repo = TestRepo::new();
+    let (path, _) = repo.write_broken_config();
+
+    let output = repo.kommit_config(&["show"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr was {stderr}");
+    assert!(
+        stderr.contains(&path.display().to_string()),
+        "stderr was {stderr}"
+    );
+}
+
+#[test]
+fn broken_config_stops_run_before_the_llm() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    let (path, _) = repo.write_broken_config();
+
+    let output = repo.kommit(&["--commit"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr was {stderr}");
+    assert!(
+        stderr.contains(&path.display().to_string()),
+        "stderr was {stderr}"
+    );
+    assert_eq!(repo.llm.prompts(), Vec::<String>::new());
+    assert_eq!(repo.status(), " M tracked.txt\n");
+}
+
+#[test]
+fn config_set_creates_a_missing_config_file() {
+    let repo = TestRepo::new();
+    let path = repo.config_path();
+
+    let output = repo.kommit_config(&["set", "port", "1234"]);
+
+    assert!(output.status.success(), "config set: {output:?}");
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("port = 1234"), "config was {content}");
 }

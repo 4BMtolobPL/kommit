@@ -4,10 +4,12 @@ use anyhow::Context;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
-use tracing::{debug, warn};
+use std::io;
+use std::path::{Path, PathBuf};
+use tracing::debug;
 
 #[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     pub(crate) model: Option<String>,
     pub(crate) lang: Option<ResponseLang>,
@@ -20,30 +22,32 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    pub(crate) fn load() -> Self {
-        let config_path = Self::get_config_path();
-
-        if let Some(path) = config_path {
-            debug!(?path, "Checking for config file");
-            if path.exists() {
-                match fs::read_to_string(&path) {
-                    Ok(content) => match toml::from_str(&content) {
-                        Ok(config) => {
-                            debug!(?config, "Loaded config from file");
-                            return config;
-                        }
-                        Err(e) => {
-                            warn!(?e, "Failed to parse config file");
-                        }
-                    },
-                    Err(e) => {
-                        warn!(?e, "Failed to read config file");
-                    }
-                }
-            }
+    /// Loads the config file, or the defaults if there is no config file.
+    ///
+    /// A file that cannot be read or parsed is an error rather than the defaults,
+    /// so that `config set` never overwrites settings it failed to load.
+    pub(crate) fn load() -> anyhow::Result<Self> {
+        match Self::get_config_path() {
+            Some(path) => Self::load_from(&path),
+            // Without a home directory there is no config file to read.
+            None => Ok(Self::default()),
         }
+    }
 
-        Config::default()
+    fn load_from(path: &Path) -> anyhow::Result<Self> {
+        debug!(?path, "Checking for config file");
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("Failed to read config file {}", path.display()));
+            }
+        };
+        let config = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config file {}", path.display()))?;
+        debug!(?config, "Loaded config from file");
+        Ok(config)
     }
 
     pub(crate) fn save(&self) -> anyhow::Result<()> {
@@ -76,5 +80,65 @@ impl Config {
                 "pnpm-lock.yaml".to_string(),
             ]
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_str(content: &str) -> (tempfile::TempDir, PathBuf, anyhow::Result<Config>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, content).unwrap();
+        let result = Config::load_from(&path);
+        (dir, path, result)
+    }
+
+    #[test]
+    fn missing_file_loads_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::load_from(&dir.path().join("config.toml")).unwrap();
+        assert!(config.model.is_none());
+        assert!(config.port.is_none());
+        assert!(config.exclude_patterns.is_none());
+    }
+
+    #[test]
+    fn valid_file_is_loaded() {
+        let (_dir, _path, result) =
+            load_str("model = \"llama\"\nport = 1234\nexclude_patterns = [\"*.min.js\"]\n");
+        let config = result.unwrap();
+        assert_eq!(config.model.as_deref(), Some("llama"));
+        assert_eq!(config.port, Some(1234));
+        assert_eq!(config.exclude_patterns, Some(vec!["*.min.js".to_string()]));
+    }
+
+    #[test]
+    fn invalid_value_is_an_error_naming_the_file() {
+        let (_dir, path, result) = load_str("provider = \"invalid\"\n");
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(
+            message.contains(&path.display().to_string()),
+            "message was {message}"
+        );
+        assert!(message.contains("invalid"), "message was {message}");
+    }
+
+    #[test]
+    fn unknown_key_is_an_error() {
+        let (_dir, _path, result) = load_str("modle = \"x\"\n");
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("modle"), "message was {message}");
+    }
+
+    #[test]
+    fn unreadable_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let message = format!("{:#}", Config::load_from(dir.path()).unwrap_err());
+        assert!(
+            message.contains("Failed to read config file"),
+            "message was {message}"
+        );
     }
 }
