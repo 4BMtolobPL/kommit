@@ -129,6 +129,14 @@ impl ProviderStrategy for LmStudioClient {
 
                         yield Ok(StreamResponse::Generate(content));
                     }
+                    StreamEvent::Error { error } => {
+                        yield Err(anyhow::anyhow!(
+                            "LM Studio returned an error: {} ({:?})",
+                            error.message,
+                            error.error_type
+                        ));
+                        return;
+                    }
                     _ => continue,
                 }
             }
