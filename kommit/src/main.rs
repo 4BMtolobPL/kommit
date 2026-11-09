@@ -20,7 +20,7 @@ use crate::provider::{LlmProvider, StreamResponse, create_client};
 use anyhow::{Context, anyhow, bail};
 use clap::Parser;
 use futures::StreamExt;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream};
 use std::io::{self, BufRead, IsTerminal, Write};
 use tempfile::NamedTempFile;
 use tracing::info;
@@ -40,9 +40,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Logs go to stderr, so that stdout carries only the commit message.
 fn init_tracing() {
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
     let subscriber = fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_writer(io::stderr)
+        .with_ansi(io::stderr().is_terminal() && !no_color)
         .pretty()
         .finish();
 
@@ -92,14 +96,9 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     info!(diff_len, "Processing diff");
 
     let prompt = if diff_len > 15000 {
-        println!(
-            "{}",
-            format!(
-                "⚠️ Large diff detected ({} bytes). Switching to 2-Step Generation.",
-                diff_len
-            )
-            .yellow()
-        );
+        warn(&format!(
+            "⚠️ Large diff detected ({diff_len} bytes). Switching to 2-Step Generation."
+        ));
         let chunks = split_diff(&diff);
         let summaries = generate_summary_for_chunks(
             client.as_ref(),
@@ -115,34 +114,43 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     };
 
     let mut buffer = Vec::new();
+    // On a terminal the streamed tokens already show the message, so it is not printed
+    // again. Otherwise stdout is captured, and only the cleaned message may reach it.
+    let streamed_to_stdout = stream_enabled && io::stdout().is_terminal();
 
     if stream_enabled {
         let mut stream = client.generate_stream(&model, &prompt, think).await?;
-        // Stdout is line-buffered, so each token is flushed to appear as it arrives.
-        let mut out = io::stdout().lock();
+        // A preview on stderr when stdout is captured, so the user still sees progress.
+        let mut tokens: Box<dyn Write> = if streamed_to_stdout {
+            Box::new(io::stdout())
+        } else {
+            Box::new(io::stderr())
+        };
+        let mut thinking = io::stderr();
 
         while let Some(res) = stream.next().await {
             match res? {
                 StreamResponse::Think(text) => {
-                    write!(&mut out, "{}", text.bright_black())?;
-                    out.flush()?;
+                    let text = text.if_supports_color(Stream::Stderr, |text| text.bright_black());
+                    write!(thinking, "{text}")?;
+                    thinking.flush()?;
                 }
                 StreamResponse::ThinkDone => {
-                    writeln!(&mut out, "\n\n")?;
+                    writeln!(thinking, "\n\n")?;
                 }
                 StreamResponse::Generate(text) => {
-                    write!(&mut out, "{}", text)?;
-                    out.flush()?;
-                    write!(&mut buffer, "{}", text)?;
+                    // Flushed per token, since stdout is line-buffered.
+                    write!(tokens, "{text}")?;
+                    tokens.flush()?;
+                    buffer.extend_from_slice(text.as_bytes());
                 }
             }
         }
         // eol
-        writeln!(out)?;
+        writeln!(tokens)?;
     } else {
         let message = client.generate(&model, &prompt, think).await?;
-        println!("{message}");
-        write!(&mut buffer, "{}", message)?;
+        buffer.extend_from_slice(message.as_bytes());
     }
 
     if buffer.is_empty() {
@@ -154,30 +162,26 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     let raw_message =
         String::from_utf8(buffer).context("Failed to parse output buffer to string")?;
     let final_message = clean_commit_message(&raw_message);
+    if !streamed_to_stdout {
+        writeln!(io::stdout(), "{final_message}")?;
+    }
 
     let is_valid = validate_commit_message(&final_message);
     if !is_valid {
-        println!(
-            "{}",
-            "⚠️ Warning: The generated message does not follow Conventional Commits format."
-                .yellow()
-        );
-        println!(
-            "{}",
-            format!(
-                "Expected format: <type>[(<scope>)][!]: <summary> (Types: {})",
-                COMMIT_TYPES.join(", ")
-            )
-            .yellow()
-        );
+        warn("⚠️ Warning: The generated message does not follow Conventional Commits format.");
+        warn(&format!(
+            "Expected format: <type>[(<scope>)][!]: <summary> (Types: {})",
+            COMMIT_TYPES.join(", ")
+        ));
     }
 
     if args.commit || args.push {
         let mut edit_required = args.edit;
         if !is_valid && !args.edit {
-            println!(
+            eprintln!(
                 "{}",
-                "Auto-enabling edit mode so you can correct the format in your editor.".cyan()
+                "Auto-enabling edit mode so you can correct the format in your editor."
+                    .if_supports_color(Stream::Stderr, |text| text.cyan())
             );
             edit_required = true;
         }
@@ -246,7 +250,8 @@ fn confirm_untracked(
     writeln!(
         stderr,
         "{}",
-        "Untracked files will be sent to the LLM and committed:".yellow()
+        "Untracked files will be sent to the LLM and committed:"
+            .if_supports_color(Stream::Stderr, |text| text.yellow())
     )?;
     for file in files {
         writeln!(stderr, "  {file}")?;
@@ -287,11 +292,19 @@ fn print_unused_message(tempfile: &NamedTempFile, fallback: &str, index_restored
     } else {
         "The commit was not created. Commit message:"
     };
-    eprintln!("{}", notice.yellow());
+    warn(notice);
     let mut stderr = io::stderr().lock();
     let _ = stderr
         .write_all(message)
         .and_then(|()| stderr.write_all(b"\n"));
+}
+
+/// Prints a warning on stderr, in yellow when stderr supports colors.
+fn warn(message: &str) {
+    eprintln!(
+        "{}",
+        message.if_supports_color(Stream::Stderr, |text| text.yellow())
+    );
 }
 
 fn config(args: ConfigArgs) -> anyhow::Result<()> {
@@ -385,7 +398,7 @@ async fn generate_summary_for_chunks(
         let chunk_to_send = truncate_chunk(chunk);
 
         let summary_prompt = build_summary_prompt(&chunk_to_send, lang.clone());
-        println!("⏳ Summarizing diff chunk {}/{}...", i + 1, total_chunks);
+        eprintln!("⏳ Summarizing diff chunk {}/{}...", i + 1, total_chunks);
         let summary = client
             .generate(model, &summary_prompt, think.clone())
             .await?;
