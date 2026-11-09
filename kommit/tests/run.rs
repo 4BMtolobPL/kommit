@@ -841,3 +841,29 @@ fn conflicting_ports_stop_before_the_llm() {
     assert!(stderr.contains("Conflicting ports"), "stderr was {stderr}");
     assert_eq!(repo.llm.prompts(), Vec::<String>::new());
 }
+
+#[test]
+fn large_diff_is_split_per_file_despite_color_config() {
+    let repo = TestRepo::with_commit();
+    repo.git(&["config", "color.ui", "always"]);
+    // About 9 KB per file, so that the diff takes the 2-step path but no chunk is truncated.
+    let content = format!("{}\n", "x".repeat(80)).repeat(110);
+    repo.write("tracked.txt", &content);
+    repo.write("other/file.txt", &content);
+
+    let output = repo.kommit(&[]);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("chunk 1/2"), "stdout was {stdout}");
+    assert!(stdout.contains("chunk 2/2"), "stdout was {stdout}");
+    let prompts = repo.llm.prompts();
+    let summaries = prompts
+        .iter()
+        .filter(|prompt| prompt.contains("git diff chunk"))
+        .count();
+    assert_eq!(summaries, 2, "prompts were {prompts:?}");
+    for prompt in &prompts {
+        assert!(!prompt.contains('\x1b'), "prompt was {prompt:?}");
+    }
+}

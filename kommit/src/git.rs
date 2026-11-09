@@ -8,6 +8,20 @@ use tracing::info;
 /// How many excluded files to name before summarizing the rest as a count.
 const MAX_LISTED_EXCLUDED_FILES: usize = 10;
 
+/// Pins the diff format that the prompt and `split_diff` rely on, whatever the user's
+/// git configuration says.
+const DIFF_FORMAT_ARGS: [&str; 5] = [
+    // color.ui or color.diff set to always.
+    "--no-color",
+    // diff.external, GIT_EXTERNAL_DIFF, and diff drivers in .gitattributes.
+    "--no-ext-diff",
+    // diff.submodule set to log or diff, which leaves out the `diff --git` header.
+    "--submodule=short",
+    // diff.noprefix, diff.mnemonicPrefix, diff.srcPrefix, and diff.dstPrefix.
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+];
+
 /// A snapshot of the repository changes: what the LLM reads and what gets committed.
 pub(crate) struct ReviewedChanges {
     pub(crate) diff: String,
@@ -180,7 +194,9 @@ fn read_staged_diff(
         .map(|pat| format!(":(exclude){}", pat));
 
     let output = git_with_index(root, index)
-        .args(["diff", "--staged", "--", "."])
+        .args(["diff", "--staged"])
+        .args(DIFF_FORMAT_ARGS)
+        .args(["--", "."])
         .args(exclude_args)
         .output()?;
 
@@ -896,6 +912,56 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(output.stdout, b":(exclude)b.txt\0a *.txt\0");
+    }
+
+    #[test]
+    fn review_ignores_diff_display_config() {
+        let _lock = cwd_lock();
+        let repo = tempfile::tempdir().unwrap();
+        init(repo.path());
+        fs::write(repo.path().join("one.txt"), "1\n").unwrap();
+        fs::write(repo.path().join("two.txt"), "1\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        git(repo.path(), &["config", "color.ui", "always"]);
+        // Fails the diff if it is ever run.
+        git(repo.path(), &["config", "diff.external", "false"]);
+        git(repo.path(), &["config", "diff.noprefix", "true"]);
+        git(repo.path(), &["config", "diff.submodule", "log"]);
+        let head = Command::new("git")
+            .current_dir(repo.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let head = String::from_utf8(head.stdout).unwrap();
+        // A gitlink stands in for a submodule without cloning one. It has no work tree,
+        // so it is reviewed as staged, which `git add --update` would otherwise remove.
+        git(
+            repo.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},sub", head.trim()),
+            ],
+        );
+        fs::write(repo.path().join("one.txt"), "2\n").unwrap();
+        fs::write(repo.path().join("two.txt"), "2\n").unwrap();
+        git(repo.path(), &["add", "one.txt", "two.txt"]);
+        let _cwd = CwdGuard::enter(repo.path());
+
+        let diff = review_changes(true, &[]).unwrap().diff;
+
+        assert!(!diff.contains('\x1b'), "diff was {diff:?}");
+        for file in ["one.txt", "two.txt", "sub"] {
+            let header = format!("diff --git a/{file} b/{file}\n");
+            assert!(diff.contains(&header), "diff was {diff:?}");
+        }
+        let headers = diff
+            .lines()
+            .filter(|line| line.starts_with("diff --git "))
+            .count();
+        assert_eq!(headers, 3, "diff was {diff:?}");
     }
 
     fn quiet(program: &str, args: &[&str]) -> Command {
