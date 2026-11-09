@@ -376,14 +376,25 @@ pub(crate) fn commit(file: &NamedTempFile) -> anyhow::Result<()> {
     info!(file = %file.path().display(), "Committing with message");
 
     run_checked(
-        Command::new("git").args(["commit", "-F"]).arg(file.path()),
+        Command::new("git")
+            .args(["commit", "-F"])
+            .arg(file.path())
+            .stdout(stdout_to_stderr()),
         "git commit",
     )
 }
 
 pub(crate) fn push() -> anyhow::Result<()> {
     info!("Pushing");
-    run_checked(Command::new("git").args(["push"]), "git push")
+    run_checked(
+        Command::new("git").arg("push").stdout(stdout_to_stderr()),
+        "git push",
+    )
+}
+
+/// Sends a child's stdout to our stderr, so that stdout carries only the commit message.
+fn stdout_to_stderr() -> Stdio {
+    Stdio::from(std::io::stderr())
 }
 
 pub(crate) fn save_buffer_to_tempfile(buffer: &[u8]) -> anyhow::Result<NamedTempFile> {

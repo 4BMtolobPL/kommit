@@ -61,6 +61,25 @@ kommit run --commit --push
 kommit run --lang ko --provider ollama --model gemma2 --host 127.0.0.1 --port 11434
 ```
 
+#### 출력과 다른 도구와의 조합
+
+표준 출력(stdout)에는 정리된 커밋 메시지만 출력됩니다. 경고, 진행 상황, 추론(Thinking) 내용, 로그, `git commit`/`git push`의 출력은 모두 표준 에러(stderr)로 출력되므로, 생성된 메시지를 그대로 캡처해 다른 명령과 조합할 수 있습니다.
+
+```bash
+# --commit이 지원하지 않는 git 옵션과 함께 커밋 (서명, amend 등)
+git commit -S -m "$(kommit run --staged)"
+
+# prepare-commit-msg 훅에서 메시지를 미리 채우기
+kommit run --staged > "$1"
+
+# 클립보드로 복사 (macOS)
+kommit run | pbcopy
+```
+
+`--stream`을 사용하면 stdout이 터미널일 때는 메시지가 생성되는 대로 stdout에 표시되고, 파이프나 리다이렉트로 캡처될 때는 생성 과정이 stderr에 미리 보기로 표시된 뒤 정리된 메시지만 stdout에 출력됩니다.
+
+색상은 출력 대상이 터미널일 때만 적용되며, `NO_COLOR` 환경 변수를 설정하면 비활성화됩니다.
+
 #### `run` 주요 옵션
 
 | 옵션               | 설명                                                                 | 기본값      |

@@ -25,7 +25,7 @@ impl OllamaClient {
 
     async fn pull_model(&self, model: &str) -> anyhow::Result<()> {
         info!("Pulling model '{}'...", model);
-        println!(
+        eprintln!(
             "Model '{}' not found locally. Pulling model, please wait...",
             model
         );
@@ -34,14 +34,14 @@ impl OllamaClient {
             .pull_model(model.to_string(), false)
             .await
             .map_err(map_ollama_error)?;
-        println!("{:?}", res);
-        println!("Successfully pulled model '{}'.", model);
+        info!(?res, "Pulled model");
+        eprintln!("Successfully pulled model '{}'.", model);
         Ok(())
     }
 
     async fn pull_model_stream(&self, model: &str) -> anyhow::Result<()> {
         info!("Pulling model '{}'...", model);
-        println!(
+        eprintln!(
             "Model '{}' not found locally. Pulling model, please wait...",
             model
         );
@@ -83,14 +83,14 @@ impl OllamaClient {
             let res = res.map_err(map_ollama_error)?;
 
             if res.digest.is_none() {
-                println!("{}", res.message);
+                eprintln!("{}", res.message);
             } else {
                 print_progress(res);
             }
         }
         // multi_progress.clear().unwrap();
 
-        println!("Successfully pulled model '{}'.", model);
+        eprintln!("Successfully pulled model '{}'.", model);
         Ok(())
     }
 }

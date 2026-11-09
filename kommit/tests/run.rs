@@ -23,6 +23,8 @@ struct FakeLlm {
     port: u16,
     prompts: Arc<Mutex<Vec<String>>>,
     gate: StreamGate,
+    /// What a non-streamed response returns.
+    response: Arc<Mutex<String>>,
 }
 
 impl FakeLlm {
@@ -33,16 +35,25 @@ impl FakeLlm {
         let recorded = Arc::clone(&prompts);
         let gate = StreamGate::default();
         let server_gate = Arc::clone(&gate);
+        let response = Arc::new(Mutex::new(COMMIT_MESSAGE.to_owned()));
+        let server_response = Arc::clone(&response);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
-                respond(stream.unwrap(), &recorded, &server_gate);
+                let response = server_response.lock().unwrap().clone();
+                respond(stream.unwrap(), &recorded, &server_gate, &response);
             }
         });
         Self {
             port,
             prompts,
             gate,
+            response,
         }
+    }
+
+    /// Makes every later non-streamed response return `response`.
+    fn respond_with(&self, response: &str) {
+        *self.response.lock().unwrap() = response.to_owned();
     }
 
     fn prompts(&self) -> Vec<String> {
@@ -58,7 +69,7 @@ impl FakeLlm {
     }
 }
 
-fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGate) {
+fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGate, response: &str) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut content_length = 0;
     loop {
@@ -89,7 +100,7 @@ fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGat
     let response = serde_json::json!({
         "model": "test",
         "created_at": "2026-01-01T00:00:00Z",
-        "response": COMMIT_MESSAGE,
+        "response": response,
         "done": true,
     })
     .to_string();
@@ -948,10 +959,15 @@ fn large_diff_is_split_per_file_despite_color_config() {
 
     let output = repo.kommit(&[]);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{output:?}");
-    assert!(stdout.contains("chunk 1/2"), "stdout was {stdout}");
-    assert!(stdout.contains("chunk 2/2"), "stdout was {stdout}");
+    assert!(
+        stderr.contains("Large diff detected"),
+        "stderr was {stderr}"
+    );
+    assert!(stderr.contains("chunk 1/2"), "stderr was {stderr}");
+    assert!(stderr.contains("chunk 2/2"), "stderr was {stderr}");
+    assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
     let prompts = repo.llm.prompts();
     let summaries = prompts
         .iter()
@@ -963,8 +979,10 @@ fn large_diff_is_split_per_file_despite_color_config() {
     }
 }
 
+/// With stdout captured, the tokens are previewed on stderr as they arrive, and stdout
+/// receives only the finished message.
 #[test]
-fn streamed_tokens_are_printed_before_the_stream_ends() {
+fn streamed_tokens_are_previewed_on_stderr_before_the_stream_ends() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
     let first_token_seen = repo.llm.hold_stream_after_first_token();
@@ -972,14 +990,15 @@ fn streamed_tokens_are_printed_before_the_stream_ends() {
     let mut child = repo
         .kommit_command("", &["--stream", "true"])
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
     let mut printed = Vec::new();
     let mut printed_when_first_token_seen = None;
     let mut chunk = [0; 1024];
     loop {
-        let read = stdout.read(&mut chunk).unwrap();
+        let read = stderr.read(&mut chunk).unwrap();
         if read == 0 {
             break;
         }
@@ -990,15 +1009,68 @@ fn streamed_tokens_are_printed_before_the_stream_ends() {
             printed_when_first_token_seen = Some(text);
         }
     }
-    let status = child.wait().unwrap();
+    let output = child.wait_with_output().unwrap();
 
     let printed = String::from_utf8_lossy(&printed);
-    assert!(status.success(), "stdout was {printed}");
-    assert!(printed.contains(COMMIT_MESSAGE), "stdout was {printed}");
-    // The server sends the second token only after the first one appears on stdout.
+    assert!(output.status.success(), "stderr was {printed}");
+    assert!(printed.contains(COMMIT_MESSAGE), "stderr was {printed}");
+    // The server sends the second token only after the first one appears on stderr.
     let early = printed_when_first_token_seen.unwrap();
     assert!(
         !early.contains(STREAM_TOKENS[1]),
-        "stdout was {early:?} when the first token appeared"
+        "stderr was {early:?} when the first token appeared"
+    );
+    assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
+}
+
+// Issue #49: stdout carries only the commit message, so that it can be captured.
+#[test]
+fn stdout_is_only_the_cleaned_message() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    repo.llm
+        .respond_with(&format!("```\n{COMMIT_MESSAGE}\n\nbody line\n```"));
+
+    let output = repo.kommit(&[]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{COMMIT_MESSAGE}\n\nbody line\n")
+    );
+}
+
+#[test]
+fn format_warning_goes_to_stderr_without_colors() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    repo.llm.respond_with("add a feature");
+
+    let output = repo.kommit(&[]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "add a feature\n");
+    assert!(
+        stderr.contains("does not follow Conventional Commits"),
+        "stderr was {stderr}"
+    );
+    assert!(!stderr.contains('\x1b'), "stderr was {stderr:?}");
+}
+
+#[test]
+fn commit_keeps_git_output_off_stdout() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+
+    let output = repo.kommit(&["--commit"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
+    // git commit reports the new commit as "[<branch> <hash>] <subject>".
+    assert!(
+        stderr.contains(&format!("] {COMMIT_MESSAGE}")),
+        "stderr was {stderr}"
     );
 }
