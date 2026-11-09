@@ -13,7 +13,8 @@ use crate::git::{
     save_buffer_to_tempfile,
 };
 use crate::prompt::{
-    ResponseLang, build_commit_from_summaries_prompt, build_prompt, build_summary_prompt,
+    COMMIT_TYPES, ResponseLang, build_commit_from_summaries_prompt, build_prompt,
+    build_summary_prompt,
 };
 use crate::provider::{LlmProvider, StreamResponse, create_client};
 use anyhow::{Context, anyhow, bail};
@@ -161,7 +162,14 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             "⚠️ Warning: The generated message does not follow Conventional Commits format."
                 .yellow()
         );
-        println!("{}", "Expected format: <type>: <summary> (Types: feat, fix, refactor, docs, test, chore, etc.)".yellow());
+        println!(
+            "{}",
+            format!(
+                "Expected format: <type>[(<scope>)][!]: <summary> (Types: {})",
+                COMMIT_TYPES.join(", ")
+            )
+            .yellow()
+        );
     }
 
     if args.commit || args.push {
@@ -413,27 +421,33 @@ fn clean_commit_message(msg: &str) -> String {
 }
 
 fn validate_commit_message(msg: &str) -> bool {
+    // title = type [ "(" scope ")" ] [ "!" ] ":" SP summary
     let title = msg.lines().next().unwrap_or("").trim();
-    if title.is_empty() {
+
+    let type_end = title
+        .find(|c: char| !c.is_ascii_lowercase())
+        .unwrap_or(title.len());
+    let (commit_type, mut rest) = title.split_at(type_end);
+    if !COMMIT_TYPES.contains(&commit_type) {
         return false;
     }
 
-    let valid_types = [
-        "feat", "fix", "refactor", "docs", "test", "chore", "style", "ci", "perf", "build",
-    ];
-
-    if let Some(colon_idx) = title.find(':') {
-        let prefix = title[..colon_idx].trim();
-        let commit_type = if let Some(open_paren) = prefix.find('(') {
-            prefix[..open_paren].trim()
-        } else {
-            prefix
+    if let Some(after_open) = rest.strip_prefix('(') {
+        let Some(close) = after_open.find(')') else {
+            return false;
         };
-
-        valid_types.contains(&commit_type)
-    } else {
-        false
+        let scope = &after_open[..close];
+        if scope.trim().is_empty() || scope.contains('(') {
+            return false;
+        }
+        rest = &after_open[close + 1..];
     }
+    rest = rest.strip_prefix('!').unwrap_or(rest);
+
+    let Some(summary) = rest.strip_prefix(':') else {
+        return false;
+    };
+    summary.starts_with(char::is_whitespace) && !summary.trim().is_empty()
 }
 
 #[cfg(test)]
@@ -554,5 +568,33 @@ mod tests {
         assert!(!validate_commit_message("add new feature"));
         assert!(!validate_commit_message("feat-add-something"));
         assert!(!validate_commit_message("invalid_type: test"));
+
+        // Breaking-change marker, scopes, extra types and bodies
+        for ok in [
+            "feat!: drop old api",
+            "fix(db)!: change schema",
+            "perf: speed up diff",
+            "docs(readme): update",
+            "feat: x\n\nbody",
+        ] {
+            assert!(validate_commit_message(ok), "should accept {ok:?}");
+        }
+
+        // Malformed scope, summary, ordering, casing
+        for bad in [
+            "feat(: ",
+            "feat(): x",
+            "feat( ): x",
+            "feat(a: x",
+            "feat:",
+            "feat:   ",
+            "feat:x",
+            "feat!(x): y",
+            "feat(a)(b): x",
+            "Feat: x",
+            "",
+        ] {
+            assert!(!validate_commit_message(bad), "should reject {bad:?}");
+        }
     }
 }

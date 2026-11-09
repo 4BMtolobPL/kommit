@@ -75,14 +75,21 @@ Summarized Changes:
     )
 }
 
-fn commit_guidelines() -> &'static str {
-    r#"
+/// Conventional Commits types shared by the prompt and the validator.
+pub(crate) const COMMIT_TYPES: &[&str] = &[
+    "feat", "fix", "refactor", "docs", "test", "chore", "style", "ci", "perf", "build",
+];
+
+fn commit_guidelines() -> String {
+    format!(
+        r#"
 Follow these rules strictly:
 
 [Format]
 - Use Conventional Commits format:
-  <type>: <short summary>
-- Types: feat, fix, refactor, docs, test, chore
+  <type>[(<scope>)][!]: <short summary>
+- Types: {0}
+- Scope is optional; use `!` only for breaking changes
 
 [Structure]
 - Title must be <= 50 characters
@@ -103,7 +110,9 @@ Follow these rules strictly:
 
 [Output Rules]
 - Output ONLY the commit message
-"#
+"#,
+        COMMIT_TYPES.join(", ")
+    )
 }
 
 #[derive(Clone, Debug, ValueEnum, Serialize, Deserialize)]
@@ -116,5 +125,25 @@ pub(crate) enum ResponseLang {
 impl Display for ResponseLang {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_possible_value().unwrap().get_name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_commit_guidelines_lists_all_commit_types() {
+        let guidelines = commit_guidelines();
+        let types_line = guidelines
+            .lines()
+            .find(|l| l.starts_with("- Types:"))
+            .expect("guidelines should contain a Types line");
+        for ty in COMMIT_TYPES {
+            assert!(
+                types_line.split([' ', ',']).any(|t| t == *ty),
+                "type `{ty}` missing from prompt: {types_line}"
+            );
+        }
     }
 }
