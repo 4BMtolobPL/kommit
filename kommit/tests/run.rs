@@ -19,7 +19,7 @@ const STREAM_TOKENS: [&str; 2] = ["feat: ", "test message"];
 /// Holds back the rest of a streamed response after its first token until signaled.
 type StreamGate = Arc<Mutex<Option<Receiver<()>>>>;
 
-struct FakeLlm {
+struct FakeOllama {
     port: u16,
     prompts: Arc<Mutex<Vec<String>>>,
     gate: StreamGate,
@@ -27,7 +27,7 @@ struct FakeLlm {
     response: Arc<Mutex<String>>,
 }
 
-impl FakeLlm {
+impl FakeOllama {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -40,7 +40,7 @@ impl FakeLlm {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let response = server_response.lock().unwrap().clone();
-                respond(stream.unwrap(), &recorded, &server_gate, &response);
+                respond_ollama(stream.unwrap(), &recorded, &server_gate, &response);
             }
         });
         Self {
@@ -69,7 +69,12 @@ impl FakeLlm {
     }
 }
 
-fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGate, response: &str) {
+fn respond_ollama(
+    mut stream: TcpStream,
+    prompts: &Mutex<Vec<String>>,
+    gate: &StreamGate,
+    response: &str,
+) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut content_length = 0;
     loop {
@@ -93,7 +98,7 @@ fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGat
         .push(request["prompt"].as_str().unwrap().to_owned());
 
     if request["stream"] == true {
-        respond_streaming(stream, gate);
+        respond_ollama_streaming(stream, gate);
         return;
     }
 
@@ -114,7 +119,7 @@ fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGat
 }
 
 /// Sends `STREAM_TOKENS` as newline-delimited JSON, ending the body by closing the connection.
-fn respond_streaming(mut stream: TcpStream, gate: &StreamGate) {
+fn respond_ollama_streaming(mut stream: TcpStream, gate: &StreamGate) {
     let line = |response: &str, done: bool| {
         let chunk = serde_json::json!({
             "model": "test",
@@ -148,7 +153,7 @@ fn respond_streaming(mut stream: TcpStream, gate: &StreamGate) {
 struct TestRepo {
     home: TempDir,
     repo: TempDir,
-    llm: FakeLlm,
+    ollama: FakeOllama,
 }
 
 impl TestRepo {
@@ -156,7 +161,7 @@ impl TestRepo {
         let test_repo = Self {
             home: tempfile::tempdir().unwrap(),
             repo: tempfile::tempdir().unwrap(),
-            llm: FakeLlm::start(),
+            ollama: FakeOllama::start(),
         };
         test_repo.git(&["init", "--quiet"]);
         test_repo.git(&["config", "user.email", "test@example.invalid"]);
@@ -216,7 +221,7 @@ impl TestRepo {
         self.isolate(&mut command, &self.path(relative_cwd));
         command
             .args(["run", "--host", "127.0.0.1", "--port"])
-            .arg(self.llm.port.to_string())
+            .arg(self.ollama.port.to_string())
             .args(args);
         command
     }
@@ -269,7 +274,7 @@ impl TestRepo {
     fn run_ok_in(&self, relative_cwd: &str, args: &[&str]) -> String {
         let output = self.kommit_in(relative_cwd, args);
         assert!(output.status.success(), "kommit {args:?}: {output:?}");
-        self.llm.prompts().pop().unwrap()
+        self.ollama.prompts().pop().unwrap()
     }
 
     fn run_ok(&self, args: &[&str]) -> String {
@@ -481,7 +486,7 @@ fn only_excluded_changes_stop_before_the_llm() {
             stderr.contains("Only excluded files changed: Cargo.lock."),
             "{flags:?}: stderr was {stderr}"
         );
-        assert_eq!(repo.llm.prompts(), Vec::<String>::new(), "{flags:?}");
+        assert_eq!(repo.ollama.prompts(), Vec::<String>::new(), "{flags:?}");
         assert_eq!(repo.status(), status, "{flags:?}");
         assert_eq!(repo.head(), head, "{flags:?}");
     }
@@ -512,7 +517,7 @@ fn unresolved_conflicts_stop_before_the_llm() {
             stderr.contains("Unresolved merge conflicts: tracked.txt."),
             "{flags:?}: stderr was {stderr}"
         );
-        assert_eq!(repo.llm.prompts(), Vec::<String>::new(), "{flags:?}");
+        assert_eq!(repo.ollama.prompts(), Vec::<String>::new(), "{flags:?}");
         assert_eq!(repo.status(), status, "{flags:?}");
         assert_eq!(repo.head(), head, "{flags:?}");
         assert_eq!(repo.git(&["ls-files", "--unmerged"]), unmerged, "{flags:?}");
@@ -590,7 +595,7 @@ fn edit_without_commit_or_push_is_a_usage_error() {
     assert_eq!(output.status.code(), Some(2), "stderr was {stderr}");
     assert!(stderr.contains("--commit"), "stderr was {stderr}");
     assert!(stderr.contains("--push"), "stderr was {stderr}");
-    assert!(repo.llm.prompts().is_empty());
+    assert!(repo.ollama.prompts().is_empty());
     assert_eq!(repo.status(), status);
     assert_eq!(repo.head(), head);
 }
@@ -766,7 +771,7 @@ fn untracked_files_without_a_terminal_stop_before_the_llm() {
         );
         assert!(stderr.contains(".env"), "{flags:?}: stderr was {stderr}");
         assert!(stderr.contains("--yes"), "{flags:?}: stderr was {stderr}");
-        assert_eq!(repo.llm.prompts(), Vec::<String>::new(), "{flags:?}");
+        assert_eq!(repo.ollama.prompts(), Vec::<String>::new(), "{flags:?}");
         assert_eq!(repo.status(), status, "{flags:?}");
         assert_eq!(repo.head(), head, "{flags:?}");
         assert_eq!(repo.git(&["ls-remote", "origin"]), remote_refs, "{flags:?}");
@@ -892,7 +897,7 @@ fn broken_config_stops_run_before_the_llm() {
         stderr.contains(&path.display().to_string()),
         "stderr was {stderr}"
     );
-    assert_eq!(repo.llm.prompts(), Vec::<String>::new());
+    assert_eq!(repo.ollama.prompts(), Vec::<String>::new());
     assert_eq!(repo.status(), " M tracked.txt\n");
 }
 
@@ -912,12 +917,12 @@ fn config_set_creates_a_missing_config_file() {
 fn port_in_cli_host_is_used() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    let host = format!("127.0.0.1:{}", repo.llm.port);
+    let host = format!("127.0.0.1:{}", repo.ollama.port);
 
     let output = repo.kommit_run_raw(&["--host", &host]);
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(repo.llm.prompts().len(), 1);
+    assert_eq!(repo.ollama.prompts().len(), 1);
 }
 
 #[test]
@@ -926,26 +931,30 @@ fn port_in_config_host_is_used() {
     repo.write("tracked.txt", "changed\n");
     let path = repo.config_path();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, format!("host = \"127.0.0.1:{}\"\n", repo.llm.port)).unwrap();
+    fs::write(
+        &path,
+        format!("host = \"127.0.0.1:{}\"\n", repo.ollama.port),
+    )
+    .unwrap();
 
     let output = repo.kommit_run_raw(&[]);
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(repo.llm.prompts().len(), 1);
+    assert_eq!(repo.ollama.prompts().len(), 1);
 }
 
 #[test]
 fn conflicting_ports_stop_before_the_llm() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    let host = format!("127.0.0.1:{}", repo.llm.port);
+    let host = format!("127.0.0.1:{}", repo.ollama.port);
 
     let output = repo.kommit_run_raw(&["--host", &host, "--port", "1"]);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "stderr was {stderr}");
     assert!(stderr.contains("Conflicting ports"), "stderr was {stderr}");
-    assert_eq!(repo.llm.prompts(), Vec::<String>::new());
+    assert_eq!(repo.ollama.prompts(), Vec::<String>::new());
 }
 
 #[test]
@@ -968,7 +977,7 @@ fn large_diff_is_split_per_file_despite_color_config() {
     assert!(stderr.contains("chunk 1/2"), "stderr was {stderr}");
     assert!(stderr.contains("chunk 2/2"), "stderr was {stderr}");
     assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
-    let prompts = repo.llm.prompts();
+    let prompts = repo.ollama.prompts();
     let summaries = prompts
         .iter()
         .filter(|prompt| prompt.contains("git diff chunk"))
@@ -985,7 +994,7 @@ fn large_diff_is_split_per_file_despite_color_config() {
 fn streamed_tokens_are_previewed_on_stderr_before_the_stream_ends() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    let first_token_seen = repo.llm.hold_stream_after_first_token();
+    let first_token_seen = repo.ollama.hold_stream_after_first_token();
 
     let mut child = repo
         .kommit_command("", &["--stream", "true"])
@@ -1028,7 +1037,7 @@ fn streamed_tokens_are_previewed_on_stderr_before_the_stream_ends() {
 fn stdout_is_only_the_cleaned_message() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    repo.llm
+    repo.ollama
         .respond_with(&format!("```\n{COMMIT_MESSAGE}\n\nbody line\n```"));
 
     let output = repo.kommit(&[]);
@@ -1044,7 +1053,7 @@ fn stdout_is_only_the_cleaned_message() {
 fn format_warning_goes_to_stderr_without_colors() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    repo.llm.respond_with("add a feature");
+    repo.ollama.respond_with("add a feature");
 
     let output = repo.kommit(&[]);
 
