@@ -117,18 +117,21 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     if stream_enabled {
         let mut stream = client.generate_stream(&model, &prompt, think).await?;
+        // Stdout is line-buffered, so each token is flushed to appear as it arrives.
         let mut out = io::stdout().lock();
 
         while let Some(res) = stream.next().await {
             match res? {
                 StreamResponse::Think(text) => {
                     write!(&mut out, "{}", text.bright_black())?;
+                    out.flush()?;
                 }
                 StreamResponse::ThinkDone => {
                     writeln!(&mut out, "\n\n")?;
                 }
                 StreamResponse::Generate(text) => {
                     write!(&mut out, "{}", text)?;
+                    out.flush()?;
                     write!(&mut buffer, "{}", text)?;
                 }
             }

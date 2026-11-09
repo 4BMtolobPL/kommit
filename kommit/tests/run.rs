@@ -5,15 +5,24 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::process::{Command, Output};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tempfile::TempDir;
 
 const COMMIT_MESSAGE: &str = "feat: test message";
+/// A streamed response sends `COMMIT_MESSAGE` as these tokens.
+const STREAM_TOKENS: [&str; 2] = ["feat: ", "test message"];
+
+/// Holds back the rest of a streamed response after its first token until signaled.
+type StreamGate = Arc<Mutex<Option<Receiver<()>>>>;
 
 struct FakeLlm {
     port: u16,
     prompts: Arc<Mutex<Vec<String>>>,
+    gate: StreamGate,
 }
 
 impl FakeLlm {
@@ -22,20 +31,34 @@ impl FakeLlm {
         let port = listener.local_addr().unwrap().port();
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&prompts);
+        let gate = StreamGate::default();
+        let server_gate = Arc::clone(&gate);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
-                respond(stream.unwrap(), &recorded);
+                respond(stream.unwrap(), &recorded, &server_gate);
             }
         });
-        Self { port, prompts }
+        Self {
+            port,
+            prompts,
+            gate,
+        }
     }
 
     fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
     }
+
+    /// Makes the next streamed response wait after its first token until the returned
+    /// sender signals, or a timeout passes.
+    fn hold_stream_after_first_token(&self) -> Sender<()> {
+        let (sender, receiver) = mpsc::channel();
+        *self.gate.lock().unwrap() = Some(receiver);
+        sender
+    }
 }
 
-fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>) {
+fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGate) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut content_length = 0;
     loop {
@@ -58,6 +81,11 @@ fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>) {
         .unwrap()
         .push(request["prompt"].as_str().unwrap().to_owned());
 
+    if request["stream"] == true {
+        respond_streaming(stream, gate);
+        return;
+    }
+
     let response = serde_json::json!({
         "model": "test",
         "created_at": "2026-01-01T00:00:00Z",
@@ -72,6 +100,37 @@ fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>) {
         response
     )
     .unwrap();
+}
+
+/// Sends `STREAM_TOKENS` as newline-delimited JSON, ending the body by closing the connection.
+fn respond_streaming(mut stream: TcpStream, gate: &StreamGate) {
+    let line = |response: &str, done: bool| {
+        let chunk = serde_json::json!({
+            "model": "test",
+            "created_at": "2026-01-01T00:00:00Z",
+            "response": response,
+            "done": done,
+        });
+        format!("{chunk}\n")
+    };
+
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let receiver = gate.lock().unwrap().take();
+    for (i, token) in STREAM_TOKENS.iter().enumerate() {
+        stream.write_all(line(token, false).as_bytes()).unwrap();
+        stream.flush().unwrap();
+        if i == 0
+            && let Some(receiver) = &receiver
+        {
+            // On timeout, send the rest anyway so that the test fails instead of hanging.
+            let _ = receiver.recv_timeout(Duration::from_secs(5));
+        }
+    }
+    stream.write_all(line("", true).as_bytes()).unwrap();
 }
 
 /// A repository and a home directory isolated from the user's Git and Kommit settings.
@@ -866,4 +925,44 @@ fn large_diff_is_split_per_file_despite_color_config() {
     for prompt in &prompts {
         assert!(!prompt.contains('\x1b'), "prompt was {prompt:?}");
     }
+}
+
+#[test]
+fn streamed_tokens_are_printed_before_the_stream_ends() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    let first_token_seen = repo.llm.hold_stream_after_first_token();
+
+    let mut child = repo
+        .kommit_command("", &["--stream", "true"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut printed = Vec::new();
+    let mut printed_when_first_token_seen = None;
+    let mut chunk = [0; 1024];
+    loop {
+        let read = stdout.read(&mut chunk).unwrap();
+        if read == 0 {
+            break;
+        }
+        printed.extend_from_slice(&chunk[..read]);
+        let text = String::from_utf8_lossy(&printed).into_owned();
+        if printed_when_first_token_seen.is_none() && text.contains(STREAM_TOKENS[0]) {
+            let _ = first_token_seen.send(());
+            printed_when_first_token_seen = Some(text);
+        }
+    }
+    let status = child.wait().unwrap();
+
+    let printed = String::from_utf8_lossy(&printed);
+    assert!(status.success(), "stdout was {printed}");
+    assert!(printed.contains(COMMIT_MESSAGE), "stdout was {printed}");
+    // The server sends the second token only after the first one appears on stdout.
+    let early = printed_when_first_token_seen.unwrap();
+    assert!(
+        !early.contains(STREAM_TOKENS[1]),
+        "stdout was {early:?} when the first token appeared"
+    );
 }
