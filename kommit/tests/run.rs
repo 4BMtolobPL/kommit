@@ -16,12 +16,18 @@ const COMMIT_MESSAGE: &str = "feat: test message";
 /// A streamed response sends `COMMIT_MESSAGE` as these tokens.
 const STREAM_TOKENS: [&str; 2] = ["feat: ", "test message"];
 
+/// The only model the fake Ollama server reports as not installed.
+const MISSING_MODEL: &str = "missing-model";
+
 /// Holds back the rest of a streamed response after its first token until signaled.
 type StreamGate = Arc<Mutex<Option<Receiver<()>>>>;
 
+/// A fake Ollama server with every model installed except `MISSING_MODEL`.
 struct FakeOllama {
     port: u16,
     prompts: Arc<Mutex<Vec<String>>>,
+    /// How many times a model was looked up.
+    show_requests: Arc<Mutex<usize>>,
     gate: StreamGate,
     /// What a non-streamed response returns.
     response: Arc<Mutex<String>>,
@@ -33,6 +39,8 @@ impl FakeOllama {
         let port = listener.local_addr().unwrap().port();
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&prompts);
+        let show_requests = Arc::new(Mutex::new(0));
+        let server_show_requests = Arc::clone(&show_requests);
         let gate = StreamGate::default();
         let server_gate = Arc::clone(&gate);
         let response = Arc::new(Mutex::new(COMMIT_MESSAGE.to_owned()));
@@ -40,12 +48,19 @@ impl FakeOllama {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let response = server_response.lock().unwrap().clone();
-                respond_ollama(stream.unwrap(), &recorded, &server_gate, &response);
+                respond_ollama(
+                    stream.unwrap(),
+                    &recorded,
+                    &server_show_requests,
+                    &server_gate,
+                    &response,
+                );
             }
         });
         Self {
             port,
             prompts,
+            show_requests,
             gate,
             response,
         }
@@ -58,6 +73,10 @@ impl FakeOllama {
 
     fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
+    }
+
+    fn show_requests(&self) -> usize {
+        *self.show_requests.lock().unwrap()
     }
 
     /// Makes the next streamed response wait after its first token until the returned
@@ -117,10 +136,24 @@ fn write_json(stream: &mut TcpStream, status: &str, body: &Value) {
 fn respond_ollama(
     mut stream: TcpStream,
     prompts: &Mutex<Vec<String>>,
+    show_requests: &Mutex<usize>,
     gate: &StreamGate,
     response: &str,
 ) {
-    let (_, request) = read_request(&stream);
+    let (request_line, request) = read_request(&stream);
+    if request_line == "POST /api/show" {
+        *show_requests.lock().unwrap() += 1;
+        let model = request["name"].as_str().unwrap();
+        if model == MISSING_MODEL {
+            let error = serde_json::json!({ "error": format!("model '{model}' not found") });
+            write_json(&mut stream, "404 Not Found", &error);
+        } else {
+            write_json(&mut stream, "200 OK", &serde_json::json!({}));
+        }
+        return;
+    }
+    assert_eq!(request_line, "POST /api/generate");
+
     prompts
         .lock()
         .unwrap()
@@ -1316,5 +1349,42 @@ fn lm_studio_unknown_model_stops_before_the_llm() {
         );
         assert_eq!(lm_studio.chat_requests(), 0, "stream {stream}");
         assert_eq!(lm_studio.load_requests(), 0, "stream {stream}");
+    }
+}
+
+#[test]
+fn ollama_unknown_model_stops_before_the_llm() {
+    for stream in ["false", "true"] {
+        let repo = TestRepo::with_commit();
+        repo.write("tracked.txt", "changed\n");
+
+        let output = repo.kommit(&["--model", MISSING_MODEL, "--stream", stream]);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "stream {stream}: {output:?}");
+        assert!(
+            stderr.contains("Model 'missing-model' was not found in Ollama")
+                && stderr.contains("ollama pull missing-model"),
+            "stream {stream}: stderr was {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "stream {stream}: {output:?}");
+        assert!(repo.ollama.prompts().is_empty(), "stream {stream}");
+    }
+}
+
+/// A large diff sends one generate request per chunk plus one for the message, but the
+/// model must be looked up once at most, in both modes.
+#[test]
+fn ollama_checks_the_model_once_per_run() {
+    for stream in ["false", "true"] {
+        let repo = TestRepo::with_commit();
+        repo.make_large_diff();
+
+        let output = repo.kommit(&["--stream", stream]);
+
+        assert!(output.status.success(), "stream {stream}: {output:?}");
+        assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
+        assert_eq!(repo.ollama.prompts().len(), 3, "stream {stream}");
+        assert_eq!(repo.ollama.show_requests(), 1, "stream {stream}");
     }
 }
