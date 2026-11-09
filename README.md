@@ -72,7 +72,7 @@ kommit run --lang ko --provider ollama --model gemma2 --host 127.0.0.1 --port 11
 | `-s, --stream`   | 스트리밍 응답 활성화 여부를 지정합니다.                                             | `false`  |
 | `-t, --think`    | 추론(Thinking) 레벨을 지정합니다. (`true`, `false`, `low`, `medium`, `high`) | `false`  |
 | `-c, --commit`   | 메시지 생성 후 자동으로 `git commit`을 수행합니다.                               | `false`  |
-| `-p, --push`     | 커밋 후 자동으로 `git push`를 수행합니다.                                       | `false`  |
+| `-p, --push`     | 커밋 후 자동으로 `git push`를 수행합니다. `--commit`을 포함하므로 함께 지정하지 않아도 됩니다. | `false`  |
 | `-e, --edit`     | 커밋 전 메시지를 수정할 수 있도록 편집기를 엽니다. `--commit` 또는 `--push`와 함께 사용해야 합니다. | `false`  |
 | `-y, --yes`      | 추적되지 않은 새 파일을 확인 없이 포함합니다.                                       | `false`  |
 | `--host`         | LLM 서버의 호스트 주소를 지정합니다. 포트를 포함할 수 있습니다. (`127.0.0.1:18434`, `http://host:8080`) | `None`   |

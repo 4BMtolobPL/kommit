@@ -48,7 +48,7 @@ pub(crate) struct RunArgs {
     #[arg(short, long)]
     pub(crate) commit: bool,
 
-    /// Push the changes after committing
+    /// Commit and push the changes (implies --commit)
     #[arg(short, long)]
     pub(crate) push: bool,
 
