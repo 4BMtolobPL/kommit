@@ -150,6 +150,7 @@ pub mod response {
 
     #[derive(Deserialize, Debug)]
     pub struct StreamError {
+        #[serde(rename = "type")]
         pub error_type: ErrorType,
         pub message: String,
         pub code: Option<String>,
@@ -167,5 +168,63 @@ pub mod response {
         ModelNotFound,
         JobNotFound,
         InternalError,
+        /// An error type this crate does not know yet, kept as sent by the server.
+        #[serde(untagged)]
+        Other(String),
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn parse_error(data: &str) -> StreamError {
+            match serde_json::from_str::<StreamEvent>(data).unwrap() {
+                StreamEvent::Error { error } => error,
+                other => panic!("expected an error event, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn error_event_is_parsed() {
+            let error = parse_error(
+                r#"{"type":"error","error":{"type":"invalid_request","message":"\"model\" is required","code":"missing_required_parameter","param":"model"}}"#,
+            );
+
+            assert!(matches!(error.error_type, ErrorType::InvalidRequest));
+            assert_eq!(error.message, "\"model\" is required");
+            assert_eq!(error.code.as_deref(), Some("missing_required_parameter"));
+            assert_eq!(error.param.as_deref(), Some("model"));
+        }
+
+        #[test]
+        fn error_event_without_optional_fields_is_parsed() {
+            let error = parse_error(
+                r#"{"type":"error","error":{"type":"model_not_found","message":"no such model"}}"#,
+            );
+
+            assert!(matches!(error.error_type, ErrorType::ModelNotFound));
+            assert_eq!(error.message, "no such model");
+            assert!(error.code.is_none());
+            assert!(error.param.is_none());
+        }
+
+        #[test]
+        fn documented_unknown_error_type_is_parsed() {
+            let error =
+                parse_error(r#"{"type":"error","error":{"type":"unknown","message":"boom"}}"#);
+
+            assert!(matches!(error.error_type, ErrorType::Unknown));
+            assert_eq!(error.message, "boom");
+        }
+
+        #[test]
+        fn undocumented_error_type_is_kept_as_sent() {
+            let error = parse_error(
+                r#"{"type":"error","error":{"type":"something_new","message":"boom"}}"#,
+            );
+
+            assert!(matches!(error.error_type, ErrorType::Other(ref t) if t == "something_new"));
+            assert_eq!(error.message, "boom");
+        }
     }
 }

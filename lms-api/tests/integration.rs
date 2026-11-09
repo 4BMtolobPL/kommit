@@ -44,3 +44,42 @@ async fn test_error_handling() {
         panic!("Expected Status error");
     }
 }
+
+#[cfg(feature = "stream")]
+#[tokio::test]
+async fn test_chat_stream_error_event() {
+    use lms_api::chat::request::ChatRequestBuilder;
+    use lms_api::chat::stream::response::{ErrorType, StreamEvent};
+    use tokio_stream::StreamExt;
+
+    let mut server = Server::new_async().await;
+    let url = server.url();
+
+    let _m = server
+        .mock("POST", "/api/v1/chat")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(concat!(
+            "event: error\n",
+            r#"data: {"type":"error","error":{"type":"model_not_found","message":"no such model"}}"#,
+            "\n\n",
+        ))
+        .create_async()
+        .await;
+
+    let client = LmStudio::from_url(Url::parse(&url).unwrap());
+    let request = ChatRequestBuilder::default()
+        .model("missing")
+        .input("hi")
+        .build()
+        .unwrap();
+    let mut stream = client.chat_stream(request).await.unwrap();
+
+    match stream.next().await {
+        Some(Ok(StreamEvent::Error { error })) => {
+            assert!(matches!(error.error_type, ErrorType::ModelNotFound));
+            assert_eq!(error.message, "no such model");
+        }
+        other => panic!("expected an error event, got {other:?}"),
+    }
+}
