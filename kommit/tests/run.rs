@@ -1,4 +1,4 @@
-//! Runs the real binary against a fake Ollama server that records every prompt.
+//! Runs the real binary against fake Ollama and LM Studio servers that record requests.
 
 use serde_json::Value;
 use std::fs;
@@ -19,7 +19,7 @@ const STREAM_TOKENS: [&str; 2] = ["feat: ", "test message"];
 /// Holds back the rest of a streamed response after its first token until signaled.
 type StreamGate = Arc<Mutex<Option<Receiver<()>>>>;
 
-struct FakeLlm {
+struct FakeOllama {
     port: u16,
     prompts: Arc<Mutex<Vec<String>>>,
     gate: StreamGate,
@@ -27,7 +27,7 @@ struct FakeLlm {
     response: Arc<Mutex<String>>,
 }
 
-impl FakeLlm {
+impl FakeOllama {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -40,7 +40,7 @@ impl FakeLlm {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let response = server_response.lock().unwrap().clone();
-                respond(stream.unwrap(), &recorded, &server_gate, &response);
+                respond_ollama(stream.unwrap(), &recorded, &server_gate, &response);
             }
         });
         Self {
@@ -69,8 +69,12 @@ impl FakeLlm {
     }
 }
 
-fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGate, response: &str) {
+/// Reads one HTTP request, returning its request line ("POST /path") and its JSON body,
+/// or `Value::Null` when it has none.
+fn read_request(stream: &TcpStream) -> (String, Value) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).unwrap();
     let mut content_length = 0;
     loop {
         let mut line = String::new();
@@ -86,14 +90,44 @@ fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGat
     }
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body).unwrap();
-    let request: Value = serde_json::from_slice(&body).unwrap();
+    let body = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
+    let request_line = request_line
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    (request_line, body)
+}
+
+fn write_json(stream: &mut TcpStream, status: &str, body: &Value) {
+    let body = body.to_string();
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .unwrap();
+}
+
+fn respond_ollama(
+    mut stream: TcpStream,
+    prompts: &Mutex<Vec<String>>,
+    gate: &StreamGate,
+    response: &str,
+) {
+    let (_, request) = read_request(&stream);
     prompts
         .lock()
         .unwrap()
         .push(request["prompt"].as_str().unwrap().to_owned());
 
     if request["stream"] == true {
-        respond_streaming(stream, gate);
+        respond_ollama_streaming(stream, gate);
         return;
     }
 
@@ -102,19 +136,12 @@ fn respond(mut stream: TcpStream, prompts: &Mutex<Vec<String>>, gate: &StreamGat
         "created_at": "2026-01-01T00:00:00Z",
         "response": response,
         "done": true,
-    })
-    .to_string();
-    write!(
-        stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        response.len(),
-        response
-    )
-    .unwrap();
+    });
+    write_json(&mut stream, "200 OK", &response);
 }
 
 /// Sends `STREAM_TOKENS` as newline-delimited JSON, ending the body by closing the connection.
-fn respond_streaming(mut stream: TcpStream, gate: &StreamGate) {
+fn respond_ollama_streaming(mut stream: TcpStream, gate: &StreamGate) {
     let line = |response: &str, done: bool| {
         let chunk = serde_json::json!({
             "model": "test",
@@ -144,11 +171,138 @@ fn respond_streaming(mut stream: TcpStream, gate: &StreamGate) {
     stream.write_all(line("", true).as_bytes()).unwrap();
 }
 
+const LM_STUDIO_MODEL: &str = "test-model";
+
+/// A fake LM Studio server with a single downloaded model, `LM_STUDIO_MODEL`.
+struct FakeLmStudio {
+    port: u16,
+    state: Arc<Mutex<LmStudioState>>,
+}
+
+#[derive(Default)]
+struct LmStudioState {
+    loaded_instances: usize,
+    load_requests: usize,
+    chat_requests: usize,
+}
+
+impl FakeLmStudio {
+    fn start(loaded: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = Arc::new(Mutex::new(LmStudioState {
+            loaded_instances: usize::from(loaded),
+            ..LmStudioState::default()
+        }));
+        let server_state = Arc::clone(&state);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                respond_lm_studio(stream.unwrap(), &server_state);
+            }
+        });
+        Self { port, state }
+    }
+
+    fn load_requests(&self) -> usize {
+        self.state.lock().unwrap().load_requests
+    }
+
+    fn chat_requests(&self) -> usize {
+        self.state.lock().unwrap().chat_requests
+    }
+}
+
+fn respond_lm_studio(mut stream: TcpStream, state: &Mutex<LmStudioState>) {
+    let (request_line, request) = read_request(&stream);
+    match request_line.as_str() {
+        "GET /api/v1/models" => {
+            let loaded_instances = state.lock().unwrap().loaded_instances;
+            let instances: Vec<Value> = (0..loaded_instances)
+                .map(|i| {
+                    let id = if i == 0 {
+                        LM_STUDIO_MODEL.to_owned()
+                    } else {
+                        format!("{LM_STUDIO_MODEL}:{}", i + 1)
+                    };
+                    serde_json::json!({ "id": id, "config": { "context_length": 4096 } })
+                })
+                .collect();
+            let models = serde_json::json!({
+                "models": [{
+                    "type": "llm",
+                    "publisher": "test",
+                    "key": LM_STUDIO_MODEL,
+                    "display_name": "Test Model",
+                    "size_bytes": 1,
+                    "loaded_instances": instances,
+                    "max_context_length": 4096,
+                }]
+            });
+            write_json(&mut stream, "200 OK", &models);
+        }
+        "POST /api/v1/models/load" => {
+            let mut state = state.lock().unwrap();
+            state.load_requests += 1;
+            state.loaded_instances += 1;
+            let loaded = serde_json::json!({
+                "type": "llm",
+                "instance_id": LM_STUDIO_MODEL,
+                "load_time_seconds": 0.1,
+                "status": "loaded",
+            });
+            write_json(&mut stream, "200 OK", &loaded);
+        }
+        "POST /api/v1/chat" => {
+            {
+                let mut state = state.lock().unwrap();
+                state.chat_requests += 1;
+                // Without a loaded instance, a real server would load one just in time.
+                if state.loaded_instances == 0 {
+                    state.loaded_instances = 1;
+                }
+            }
+            let result = serde_json::json!({
+                "model_instance_id": LM_STUDIO_MODEL,
+                "output": [{ "type": "message", "content": COMMIT_MESSAGE }],
+                "stats": {
+                    "input_tokens": 1.0,
+                    "total_output_tokens": 1.0,
+                    "reasoning_output_tokens": 0.0,
+                    "tokens_per_second": 1.0,
+                    "time_to_first_token_seconds": 0.1,
+                },
+            });
+            if request["stream"] == true {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                let mut events: Vec<Value> = STREAM_TOKENS
+                    .iter()
+                    .map(|token| serde_json::json!({ "type": "message.delta", "content": token }))
+                    .collect();
+                events.push(serde_json::json!({ "type": "chat.end", "result": result }));
+                for event in events {
+                    let event_type = event["type"].as_str().unwrap();
+                    write!(stream, "event: {event_type}\ndata: {event}\n\n").unwrap();
+                }
+            } else {
+                write_json(&mut stream, "200 OK", &result);
+            }
+        }
+        other => {
+            let error = serde_json::json!({ "error": format!("unexpected request {other}") });
+            write_json(&mut stream, "404 Not Found", &error);
+        }
+    }
+}
+
 /// A repository and a home directory isolated from the user's Git and Kommit settings.
 struct TestRepo {
     home: TempDir,
     repo: TempDir,
-    llm: FakeLlm,
+    ollama: FakeOllama,
 }
 
 impl TestRepo {
@@ -156,7 +310,7 @@ impl TestRepo {
         let test_repo = Self {
             home: tempfile::tempdir().unwrap(),
             repo: tempfile::tempdir().unwrap(),
-            llm: FakeLlm::start(),
+            ollama: FakeOllama::start(),
         };
         test_repo.git(&["init", "--quiet"]);
         test_repo.git(&["config", "user.email", "test@example.invalid"]);
@@ -216,7 +370,7 @@ impl TestRepo {
         self.isolate(&mut command, &self.path(relative_cwd));
         command
             .args(["run", "--host", "127.0.0.1", "--port"])
-            .arg(self.llm.port.to_string())
+            .arg(self.ollama.port.to_string())
             .args(args);
         command
     }
@@ -269,7 +423,7 @@ impl TestRepo {
     fn run_ok_in(&self, relative_cwd: &str, args: &[&str]) -> String {
         let output = self.kommit_in(relative_cwd, args);
         assert!(output.status.success(), "kommit {args:?}: {output:?}");
-        self.llm.prompts().pop().unwrap()
+        self.ollama.prompts().pop().unwrap()
     }
 
     fn run_ok(&self, args: &[&str]) -> String {
@@ -318,6 +472,33 @@ impl TestRepo {
     }
 
     /// Stages `tracked.txt`, then leaves a different unstaged edit and a new file.
+    /// Changes two files by about 9 KB each, so that the diff takes the 2-step path with
+    /// one summary per file but no chunk is truncated.
+    fn make_large_diff(&self) {
+        let content = format!("{}\n", "x".repeat(80)).repeat(110);
+        self.write("tracked.txt", &content);
+        self.write("other/file.txt", &content);
+    }
+
+    /// Runs `kommit run` against `lm_studio` instead of the fake Ollama server.
+    fn kommit_with_lm_studio(&self, lm_studio: &FakeLmStudio, args: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kommit"));
+        self.isolate(&mut command, self.repo.path());
+        command
+            .args([
+                "run",
+                "--provider",
+                "lm-studio",
+                "--host",
+                "127.0.0.1",
+                "--port",
+            ])
+            .arg(lm_studio.port.to_string())
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
     fn make_mixed_changes(&self) {
         self.write("tracked.txt", "staged line\n");
         self.git(&["add", "tracked.txt"]);
@@ -481,7 +662,7 @@ fn only_excluded_changes_stop_before_the_llm() {
             stderr.contains("Only excluded files changed: Cargo.lock."),
             "{flags:?}: stderr was {stderr}"
         );
-        assert_eq!(repo.llm.prompts(), Vec::<String>::new(), "{flags:?}");
+        assert_eq!(repo.ollama.prompts(), Vec::<String>::new(), "{flags:?}");
         assert_eq!(repo.status(), status, "{flags:?}");
         assert_eq!(repo.head(), head, "{flags:?}");
     }
@@ -512,7 +693,7 @@ fn unresolved_conflicts_stop_before_the_llm() {
             stderr.contains("Unresolved merge conflicts: tracked.txt."),
             "{flags:?}: stderr was {stderr}"
         );
-        assert_eq!(repo.llm.prompts(), Vec::<String>::new(), "{flags:?}");
+        assert_eq!(repo.ollama.prompts(), Vec::<String>::new(), "{flags:?}");
         assert_eq!(repo.status(), status, "{flags:?}");
         assert_eq!(repo.head(), head, "{flags:?}");
         assert_eq!(repo.git(&["ls-files", "--unmerged"]), unmerged, "{flags:?}");
@@ -590,7 +771,7 @@ fn edit_without_commit_or_push_is_a_usage_error() {
     assert_eq!(output.status.code(), Some(2), "stderr was {stderr}");
     assert!(stderr.contains("--commit"), "stderr was {stderr}");
     assert!(stderr.contains("--push"), "stderr was {stderr}");
-    assert!(repo.llm.prompts().is_empty());
+    assert!(repo.ollama.prompts().is_empty());
     assert_eq!(repo.status(), status);
     assert_eq!(repo.head(), head);
 }
@@ -766,7 +947,7 @@ fn untracked_files_without_a_terminal_stop_before_the_llm() {
         );
         assert!(stderr.contains(".env"), "{flags:?}: stderr was {stderr}");
         assert!(stderr.contains("--yes"), "{flags:?}: stderr was {stderr}");
-        assert_eq!(repo.llm.prompts(), Vec::<String>::new(), "{flags:?}");
+        assert_eq!(repo.ollama.prompts(), Vec::<String>::new(), "{flags:?}");
         assert_eq!(repo.status(), status, "{flags:?}");
         assert_eq!(repo.head(), head, "{flags:?}");
         assert_eq!(repo.git(&["ls-remote", "origin"]), remote_refs, "{flags:?}");
@@ -892,7 +1073,7 @@ fn broken_config_stops_run_before_the_llm() {
         stderr.contains(&path.display().to_string()),
         "stderr was {stderr}"
     );
-    assert_eq!(repo.llm.prompts(), Vec::<String>::new());
+    assert_eq!(repo.ollama.prompts(), Vec::<String>::new());
     assert_eq!(repo.status(), " M tracked.txt\n");
 }
 
@@ -912,12 +1093,12 @@ fn config_set_creates_a_missing_config_file() {
 fn port_in_cli_host_is_used() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    let host = format!("127.0.0.1:{}", repo.llm.port);
+    let host = format!("127.0.0.1:{}", repo.ollama.port);
 
     let output = repo.kommit_run_raw(&["--host", &host]);
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(repo.llm.prompts().len(), 1);
+    assert_eq!(repo.ollama.prompts().len(), 1);
 }
 
 #[test]
@@ -926,36 +1107,37 @@ fn port_in_config_host_is_used() {
     repo.write("tracked.txt", "changed\n");
     let path = repo.config_path();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, format!("host = \"127.0.0.1:{}\"\n", repo.llm.port)).unwrap();
+    fs::write(
+        &path,
+        format!("host = \"127.0.0.1:{}\"\n", repo.ollama.port),
+    )
+    .unwrap();
 
     let output = repo.kommit_run_raw(&[]);
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(repo.llm.prompts().len(), 1);
+    assert_eq!(repo.ollama.prompts().len(), 1);
 }
 
 #[test]
 fn conflicting_ports_stop_before_the_llm() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    let host = format!("127.0.0.1:{}", repo.llm.port);
+    let host = format!("127.0.0.1:{}", repo.ollama.port);
 
     let output = repo.kommit_run_raw(&["--host", &host, "--port", "1"]);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "stderr was {stderr}");
     assert!(stderr.contains("Conflicting ports"), "stderr was {stderr}");
-    assert_eq!(repo.llm.prompts(), Vec::<String>::new());
+    assert_eq!(repo.ollama.prompts(), Vec::<String>::new());
 }
 
 #[test]
 fn large_diff_is_split_per_file_despite_color_config() {
     let repo = TestRepo::with_commit();
     repo.git(&["config", "color.ui", "always"]);
-    // About 9 KB per file, so that the diff takes the 2-step path but no chunk is truncated.
-    let content = format!("{}\n", "x".repeat(80)).repeat(110);
-    repo.write("tracked.txt", &content);
-    repo.write("other/file.txt", &content);
+    repo.make_large_diff();
 
     let output = repo.kommit(&[]);
 
@@ -968,7 +1150,7 @@ fn large_diff_is_split_per_file_despite_color_config() {
     assert!(stderr.contains("chunk 1/2"), "stderr was {stderr}");
     assert!(stderr.contains("chunk 2/2"), "stderr was {stderr}");
     assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
-    let prompts = repo.llm.prompts();
+    let prompts = repo.ollama.prompts();
     let summaries = prompts
         .iter()
         .filter(|prompt| prompt.contains("git diff chunk"))
@@ -985,7 +1167,7 @@ fn large_diff_is_split_per_file_despite_color_config() {
 fn streamed_tokens_are_previewed_on_stderr_before_the_stream_ends() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    let first_token_seen = repo.llm.hold_stream_after_first_token();
+    let first_token_seen = repo.ollama.hold_stream_after_first_token();
 
     let mut child = repo
         .kommit_command("", &["--stream", "true"])
@@ -1028,7 +1210,7 @@ fn streamed_tokens_are_previewed_on_stderr_before_the_stream_ends() {
 fn stdout_is_only_the_cleaned_message() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    repo.llm
+    repo.ollama
         .respond_with(&format!("```\n{COMMIT_MESSAGE}\n\nbody line\n```"));
 
     let output = repo.kommit(&[]);
@@ -1044,7 +1226,7 @@ fn stdout_is_only_the_cleaned_message() {
 fn format_warning_goes_to_stderr_without_colors() {
     let repo = TestRepo::with_commit();
     repo.write("tracked.txt", "changed\n");
-    repo.llm.respond_with("add a feature");
+    repo.ollama.respond_with("add a feature");
 
     let output = repo.kommit(&[]);
 
@@ -1073,4 +1255,66 @@ fn commit_keeps_git_output_off_stdout() {
         stderr.contains(&format!("] {COMMIT_MESSAGE}")),
         "stderr was {stderr}"
     );
+}
+
+/// A large diff sends one chat request per chunk plus one for the message, but the model
+/// must be loaded once at most, in both modes.
+#[test]
+fn lm_studio_loads_an_unloaded_model_once_per_run() {
+    for stream in ["false", "true"] {
+        let repo = TestRepo::with_commit();
+        repo.make_large_diff();
+        let lm_studio = FakeLmStudio::start(false);
+
+        let output = repo.kommit_with_lm_studio(
+            &lm_studio,
+            &["--model", LM_STUDIO_MODEL, "--stream", stream],
+        );
+
+        assert!(output.status.success(), "stream {stream}: {output:?}");
+        assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
+        assert_eq!(lm_studio.chat_requests(), 3, "stream {stream}");
+        assert_eq!(lm_studio.load_requests(), 1, "stream {stream}");
+    }
+}
+
+#[test]
+fn lm_studio_reuses_an_already_loaded_model() {
+    for stream in ["false", "true"] {
+        let repo = TestRepo::with_commit();
+        repo.make_large_diff();
+        let lm_studio = FakeLmStudio::start(true);
+
+        let output = repo.kommit_with_lm_studio(
+            &lm_studio,
+            &["--model", LM_STUDIO_MODEL, "--stream", stream],
+        );
+
+        assert!(output.status.success(), "stream {stream}: {output:?}");
+        assert_eq!(lm_studio.chat_requests(), 3, "stream {stream}");
+        assert_eq!(lm_studio.load_requests(), 0, "stream {stream}");
+    }
+}
+
+#[test]
+fn lm_studio_unknown_model_stops_before_the_llm() {
+    for stream in ["false", "true"] {
+        let repo = TestRepo::with_commit();
+        repo.write("tracked.txt", "changed\n");
+        let lm_studio = FakeLmStudio::start(false);
+
+        let output = repo.kommit_with_lm_studio(
+            &lm_studio,
+            &["--model", "missing-model", "--stream", stream],
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "stream {stream}: {output:?}");
+        assert!(
+            stderr.contains("Model 'missing-model' was not found in LM Studio"),
+            "stream {stream}: stderr was {stderr}"
+        );
+        assert_eq!(lm_studio.chat_requests(), 0, "stream {stream}");
+        assert_eq!(lm_studio.load_requests(), 0, "stream {stream}");
+    }
 }
