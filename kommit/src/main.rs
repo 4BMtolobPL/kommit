@@ -1,11 +1,13 @@
 pub mod cli;
 pub mod config;
+pub mod endpoint;
 pub mod git;
 pub mod prompt;
 pub mod provider;
 
 use crate::cli::{Cli, Commands, ConfigArgs, ConfigItem, ConfigSubcommand, RunArgs};
 use crate::config::Config;
+use crate::endpoint::resolve_endpoint;
 use crate::git::{
     IndexBackup, apply_tree, commit, edit_commit_message, get_current_branch, push, review_changes,
     save_buffer_to_tempfile,
@@ -22,7 +24,6 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use tempfile::NamedTempFile;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
-use url::Url;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -65,21 +66,13 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         .unwrap_or(ResponseLang::En);
     let stream_enabled = args.stream.or(config.stream).unwrap_or(false);
     let think = args.think.or(config.think.clone());
-    let host_str = args.host.or(config.host.clone());
-    let port = args
-        .port
-        .or(config.port)
-        .unwrap_or_else(|| provider.default_port());
-
-    let url = if let Some(h) = host_str {
-        if h.contains("://") {
-            Url::parse(&h)?
-        } else {
-            Url::parse(&format!("http://{}", h))?
-        }
-    } else {
-        provider.default_host()
-    };
+    let (url, port) = resolve_endpoint(
+        &provider,
+        args.host.as_deref(),
+        args.port,
+        config.host.as_deref(),
+        config.port,
+    )?;
 
     let client = create_client(provider, url, port)?;
 

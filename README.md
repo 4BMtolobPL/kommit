@@ -75,7 +75,7 @@ kommit run --lang ko --provider ollama --model gemma2 --host 127.0.0.1 --port 11
 | `-p, --push`     | 커밋 후 자동으로 `git push`를 수행합니다.                                       | `false`  |
 | `-e, --edit`     | 커밋 전 사용자가 메시지를 수정할 수 있도록 편집기를 엽니다.                                | `false`  |
 | `-y, --yes`      | 추적되지 않은 새 파일을 확인 없이 포함합니다.                                       | `false`  |
-| `--host`         | LLM 서버의 호스트 주소를 지정합니다.                                             | `None`   |
+| `--host`         | LLM 서버의 호스트 주소를 지정합니다. 포트를 포함할 수 있습니다. (`127.0.0.1:18434`, `http://host:8080`) | `None`   |
 | `--port`         | LLM 서버의 포트 번호를 지정합니다.                                              | `None`   |
 
 ### 2. 설정 관리 (`config`)
@@ -96,6 +96,8 @@ kommit config set port 11434
 # 설정 디렉토리 열기
 kommit config open
 ```
+
+> 💡 **포트 결정 순서**: `--port` 또는 `--host`에 포함된 포트 → 설정의 `port` 또는 설정 `host`에 포함된 포트 → 프로바이더 기본값(Ollama `11434`, LM Studio `1234`). 같은 곳(명령행 또는 설정 파일)에서 지정한 두 포트가 서로 다르면 오류로 중단합니다.
 
 > 💡 **Tip**: `kommit config open` 명령으로 설정 폴더를 연 후, 생성된 `config.toml` 파일에 직접 `exclude_patterns` 항목을 배열 형태로 구성하여 제외하고 싶은 파일 패턴을 지정할 수 있습니다.
 > ```toml

@@ -151,6 +151,13 @@ impl TestRepo {
         command
     }
 
+    /// Runs `kommit run` with only `args`, leaving the host and port to the caller.
+    fn kommit_run_raw(&self, args: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kommit"));
+        self.isolate(&mut command, self.repo.path());
+        command.arg("run").args(args).output().unwrap()
+    }
+
     /// Runs `kommit config` with `args`.
     fn kommit_config(&self, args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_kommit"));
@@ -793,4 +800,44 @@ fn config_set_creates_a_missing_config_file() {
     assert!(output.status.success(), "config set: {output:?}");
     let content = fs::read_to_string(&path).unwrap();
     assert!(content.contains("port = 1234"), "config was {content}");
+}
+
+#[test]
+fn port_in_cli_host_is_used() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    let host = format!("127.0.0.1:{}", repo.llm.port);
+
+    let output = repo.kommit_run_raw(&["--host", &host]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.llm.prompts().len(), 1);
+}
+
+#[test]
+fn port_in_config_host_is_used() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    let path = repo.config_path();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, format!("host = \"127.0.0.1:{}\"\n", repo.llm.port)).unwrap();
+
+    let output = repo.kommit_run_raw(&[]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.llm.prompts().len(), 1);
+}
+
+#[test]
+fn conflicting_ports_stop_before_the_llm() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    let host = format!("127.0.0.1:{}", repo.llm.port);
+
+    let output = repo.kommit_run_raw(&["--host", &host, "--port", "1"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr was {stderr}");
+    assert!(stderr.contains("Conflicting ports"), "stderr was {stderr}");
+    assert_eq!(repo.llm.prompts(), Vec::<String>::new());
 }
