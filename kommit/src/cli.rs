@@ -1,6 +1,6 @@
 use crate::prompt::ResponseLang;
 use crate::provider::{LlmProvider, ThinkType};
-use clap::{Args as ClapArgs, Parser, Subcommand};
+use clap::{ArgGroup, Args as ClapArgs, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -18,6 +18,7 @@ pub(crate) enum Commands {
 }
 
 #[derive(ClapArgs, Debug)]
+#[command(group(ArgGroup::new("publish").args(["commit", "push"]).multiple(true)))]
 pub(crate) struct RunArgs {
     /// Summarize only staged changes
     #[arg(long)]
@@ -47,7 +48,7 @@ pub(crate) struct RunArgs {
     #[arg(short, long)]
     pub(crate) commit: bool,
 
-    /// Push the changes after committing
+    /// Commit and push the changes (implies --commit)
     #[arg(short, long)]
     pub(crate) push: bool,
 
@@ -59,8 +60,8 @@ pub(crate) struct RunArgs {
     #[arg(long, value_name = "PORT")]
     pub(crate) port: Option<u16>,
 
-    /// Edit the generated commit message before committing
-    #[arg(short, long)]
+    /// Edit the generated commit message before committing (requires --commit or --push)
+    #[arg(short, long, requires = "publish")]
     pub(crate) edit: bool,
 
     /// Include untracked files without asking for confirmation

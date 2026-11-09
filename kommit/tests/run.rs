@@ -565,6 +565,42 @@ fn rejected_commit_prints_the_edited_message() {
     assert!(!stderr.contains(COMMIT_MESSAGE), "stderr was {stderr}");
 }
 
+// Reproduces issue #42: `--edit` alone used to be ignored silently.
+#[test]
+fn edit_without_commit_or_push_is_a_usage_error() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    let status = repo.status();
+    let head = repo.head();
+
+    let output = repo.kommit(&["--edit"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr was {stderr}");
+    assert!(stderr.contains("--commit"), "stderr was {stderr}");
+    assert!(stderr.contains("--push"), "stderr was {stderr}");
+    assert!(repo.llm.prompts().is_empty());
+    assert_eq!(repo.status(), status);
+    assert_eq!(repo.head(), head);
+}
+
+#[cfg(unix)]
+#[test]
+fn edit_with_push_alone_commits_and_pushes_the_edited_message() {
+    let repo = TestRepo::with_commit();
+    let _remote = repo.add_remote();
+    repo.write("tracked.txt", "changed\n");
+
+    let output = repo.kommit_with_editor(
+        b"printf 'fix: edited before pushing\\n' > \"$1\"\n",
+        &["--push", "--edit"],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    let subject = repo.git(&["log", "-1", "--format=%s", "@{upstream}"]);
+    assert_eq!(subject.trim(), "fix: edited before pushing");
+}
+
 #[test]
 fn failed_push_keeps_the_commit_and_does_not_print_the_message() {
     let repo = TestRepo::with_commit();
