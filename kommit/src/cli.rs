@@ -73,6 +73,10 @@ pub(crate) struct RunArgs {
     /// Include untracked files without asking for confirmation
     #[arg(short, long)]
     pub(crate) yes: bool,
+
+    /// Download the model without asking if it is not installed
+    #[arg(long)]
+    pub(crate) pull: bool,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -163,6 +167,15 @@ mod tests {
     #[test]
     fn stream_rejects_a_non_boolean_value() {
         assert!(parse_run(&["--stream", "yes"]).is_err());
+    }
+
+    #[test]
+    fn pull_is_separate_from_yes() {
+        let args = parse_run(&["--pull"]).unwrap();
+        assert!(args.pull);
+        assert!(!args.yes);
+        assert!(!parse_run(&["--yes"]).unwrap().pull);
+        assert!(!parse_run(&[]).unwrap().pull);
     }
 
     #[test]

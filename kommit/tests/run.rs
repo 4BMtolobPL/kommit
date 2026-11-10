@@ -28,6 +28,8 @@ struct FakeOllama {
     prompts: Arc<Mutex<Vec<String>>>,
     /// How many times a model was looked up.
     show_requests: Arc<Mutex<usize>>,
+    /// How many times a model was pulled. Once pulled, `MISSING_MODEL` is installed.
+    pull_requests: Arc<Mutex<usize>>,
     gate: StreamGate,
     /// What a non-streamed response returns.
     response: Arc<Mutex<String>>,
@@ -41,6 +43,8 @@ impl FakeOllama {
         let recorded = Arc::clone(&prompts);
         let show_requests = Arc::new(Mutex::new(0));
         let server_show_requests = Arc::clone(&show_requests);
+        let pull_requests = Arc::new(Mutex::new(0));
+        let server_pull_requests = Arc::clone(&pull_requests);
         let gate = StreamGate::default();
         let server_gate = Arc::clone(&gate);
         let response = Arc::new(Mutex::new(COMMIT_MESSAGE.to_owned()));
@@ -52,6 +56,7 @@ impl FakeOllama {
                     stream.unwrap(),
                     &recorded,
                     &server_show_requests,
+                    &server_pull_requests,
                     &server_gate,
                     &response,
                 );
@@ -61,6 +66,7 @@ impl FakeOllama {
             port,
             prompts,
             show_requests,
+            pull_requests,
             gate,
             response,
         }
@@ -77,6 +83,10 @@ impl FakeOllama {
 
     fn show_requests(&self) -> usize {
         *self.show_requests.lock().unwrap()
+    }
+
+    fn pull_requests(&self) -> usize {
+        *self.pull_requests.lock().unwrap()
     }
 
     /// Makes the next streamed response wait after its first token until the returned
@@ -137,14 +147,21 @@ fn respond_ollama(
     mut stream: TcpStream,
     prompts: &Mutex<Vec<String>>,
     show_requests: &Mutex<usize>,
+    pull_requests: &Mutex<usize>,
     gate: &StreamGate,
     response: &str,
 ) {
     let (request_line, request) = read_request(&stream);
+    if request_line == "POST /api/pull" {
+        assert_eq!(request["name"], MISSING_MODEL);
+        respond_ollama_pull(stream);
+        *pull_requests.lock().unwrap() += 1;
+        return;
+    }
     if request_line == "POST /api/show" {
         *show_requests.lock().unwrap() += 1;
         let model = request["name"].as_str().unwrap();
-        if model == MISSING_MODEL {
+        if model == MISSING_MODEL && *pull_requests.lock().unwrap() == 0 {
             let error = serde_json::json!({ "error": format!("model '{model}' not found") });
             write_json(&mut stream, "404 Not Found", &error);
         } else {
@@ -171,6 +188,25 @@ fn respond_ollama(
         "done": true,
     });
     write_json(&mut stream, "200 OK", &response);
+}
+
+/// Sends the statuses of a pull as newline-delimited JSON, ending with success.
+fn respond_ollama_pull(mut stream: TcpStream) {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let statuses = [
+        serde_json::json!({ "status": "pulling manifest" }),
+        serde_json::json!({ "status": "pulling layer", "digest": "sha256:1", "total": 2000, "completed": 1000 }),
+        serde_json::json!({ "status": "pulling layer", "digest": "sha256:1", "total": 2000, "completed": 2000 }),
+        serde_json::json!({ "status": "verifying sha256 digest" }),
+        serde_json::json!({ "status": "success" }),
+    ];
+    for status in statuses {
+        writeln!(stream, "{status}").unwrap();
+    }
 }
 
 /// Sends `STREAM_TOKENS` as newline-delimited JSON, ending the body by closing the connection.
@@ -212,21 +248,41 @@ struct FakeLmStudio {
     state: Arc<Mutex<LmStudioState>>,
 }
 
-#[derive(Default)]
 struct LmStudioState {
+    /// Whether `LM_STUDIO_MODEL` has been downloaded.
+    downloaded: bool,
     loaded_instances: usize,
     load_requests: usize,
     chat_requests: usize,
+    download_requests: usize,
 }
 
 impl FakeLmStudio {
     fn start(loaded: bool) -> Self {
+        Self::start_with(LmStudioState {
+            downloaded: true,
+            loaded_instances: usize::from(loaded),
+            load_requests: 0,
+            chat_requests: 0,
+            download_requests: 0,
+        })
+    }
+
+    /// Starts a server that has not downloaded `LM_STUDIO_MODEL` yet.
+    fn start_without_model() -> Self {
+        Self::start_with(LmStudioState {
+            downloaded: false,
+            loaded_instances: 0,
+            load_requests: 0,
+            chat_requests: 0,
+            download_requests: 0,
+        })
+    }
+
+    fn start_with(state: LmStudioState) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let state = Arc::new(Mutex::new(LmStudioState {
-            loaded_instances: usize::from(loaded),
-            ..LmStudioState::default()
-        }));
+        let state = Arc::new(Mutex::new(state));
         let server_state = Arc::clone(&state);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -243,11 +299,38 @@ impl FakeLmStudio {
     fn chat_requests(&self) -> usize {
         self.state.lock().unwrap().chat_requests
     }
+
+    fn download_requests(&self) -> usize {
+        self.state.lock().unwrap().download_requests
+    }
 }
 
 fn respond_lm_studio(mut stream: TcpStream, state: &Mutex<LmStudioState>) {
     let (request_line, request) = read_request(&stream);
     match request_line.as_str() {
+        "GET /api/v1/models" if !state.lock().unwrap().downloaded => {
+            write_json(&mut stream, "200 OK", &serde_json::json!({ "models": [] }));
+        }
+        "POST /api/v1/models/download" => {
+            assert_eq!(request["model"], LM_STUDIO_MODEL);
+            state.lock().unwrap().download_requests += 1;
+            let started = serde_json::json!({
+                "job_id": "job-1",
+                "status": "downloading",
+                "total_size_bytes": 2000,
+            });
+            write_json(&mut stream, "200 OK", &started);
+        }
+        "GET /api/v1/models/download/status/job-1" => {
+            state.lock().unwrap().downloaded = true;
+            let finished = serde_json::json!({
+                "job_id": "job-1",
+                "status": "completed",
+                "downloaded_bytes": 2000,
+                "total_size_bytes": 2000,
+            });
+            write_json(&mut stream, "200 OK", &finished);
+        }
         "GET /api/v1/models" => {
             let loaded_instances = state.lock().unwrap().loaded_instances;
             let instances: Vec<Value> = (0..loaded_instances)
@@ -1344,11 +1427,13 @@ fn lm_studio_unknown_model_stops_before_the_llm() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "stream {stream}: {output:?}");
         assert!(
-            stderr.contains("Model 'missing-model' was not found in LM Studio"),
+            stderr.contains("Model 'missing-model' was not found in LM Studio")
+                && stderr.contains("--pull"),
             "stream {stream}: stderr was {stderr}"
         );
         assert_eq!(lm_studio.chat_requests(), 0, "stream {stream}");
         assert_eq!(lm_studio.load_requests(), 0, "stream {stream}");
+        assert_eq!(lm_studio.download_requests(), 0, "stream {stream}");
     }
 }
 
@@ -1364,11 +1449,13 @@ fn ollama_unknown_model_stops_before_the_llm() {
         assert!(!output.status.success(), "stream {stream}: {output:?}");
         assert!(
             stderr.contains("Model 'missing-model' was not found in Ollama")
+                && stderr.contains("--pull")
                 && stderr.contains("ollama pull missing-model"),
             "stream {stream}: stderr was {stderr}"
         );
         assert!(output.stdout.is_empty(), "stream {stream}: {output:?}");
         assert!(repo.ollama.prompts().is_empty(), "stream {stream}");
+        assert_eq!(repo.ollama.pull_requests(), 0, "stream {stream}");
     }
 }
 
@@ -1386,5 +1473,72 @@ fn ollama_checks_the_model_once_per_run() {
         assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
         assert_eq!(repo.ollama.prompts().len(), 3, "stream {stream}");
         assert_eq!(repo.ollama.show_requests(), 1, "stream {stream}");
+    }
+}
+
+/// A large diff sends several generate requests, but the model is pulled once, before any
+/// of them, and its progress stays off stdout.
+#[test]
+fn ollama_pull_downloads_a_missing_model_once_before_generating() {
+    for stream in ["false", "true"] {
+        let repo = TestRepo::with_commit();
+        repo.make_large_diff();
+
+        let output = repo.kommit(&["--model", MISSING_MODEL, "--pull", "--stream", stream]);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stream {stream}: {output:?}");
+        assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
+        assert!(
+            stderr.contains("pulling manifest") && stderr.contains("Pulled model 'missing-model'"),
+            "stream {stream}: {stderr}"
+        );
+        assert_eq!(repo.ollama.pull_requests(), 1, "stream {stream}");
+        assert_eq!(repo.ollama.prompts().len(), 3, "stream {stream}");
+    }
+}
+
+#[test]
+fn ollama_pull_skips_an_installed_model() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+
+    repo.run_ok(&["--pull"]);
+
+    assert_eq!(repo.ollama.pull_requests(), 0);
+}
+
+#[test]
+fn ollama_pull_does_nothing_without_changes() {
+    let repo = TestRepo::with_commit();
+
+    let output = repo.kommit(&["--model", MISSING_MODEL, "--pull"]);
+
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(repo.ollama.pull_requests(), 0);
+}
+
+#[test]
+fn lm_studio_pull_downloads_and_loads_a_missing_model_once() {
+    for stream in ["false", "true"] {
+        let repo = TestRepo::with_commit();
+        repo.make_large_diff();
+        let lm_studio = FakeLmStudio::start_without_model();
+
+        let output = repo.kommit_with_lm_studio(
+            &lm_studio,
+            &["--model", LM_STUDIO_MODEL, "--pull", "--stream", stream],
+        );
+
+        assert!(output.status.success(), "stream {stream}: {output:?}");
+        assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("Downloaded model '{LM_STUDIO_MODEL}'")),
+            "stream {stream}: {stderr}"
+        );
+        assert_eq!(lm_studio.download_requests(), 1, "stream {stream}");
+        assert_eq!(lm_studio.load_requests(), 1, "stream {stream}");
+        assert_eq!(lm_studio.chat_requests(), 3, "stream {stream}");
     }
 }
