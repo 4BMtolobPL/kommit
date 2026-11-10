@@ -37,11 +37,11 @@ async fn test_error_handling() {
     let result = client.models().await;
 
     assert!(result.is_err());
-    if let Err(lms_api::error::ApiError::Status(status, body)) = result {
+    if let Err(lms_api::Error::Server { status, body }) = result {
         assert_eq!(status, 500);
         assert_eq!(body, "Internal Server Error");
     } else {
-        panic!("Expected Status error");
+        panic!("Expected Server error");
     }
 }
 
@@ -82,4 +82,15 @@ async fn test_chat_stream_error_event() {
         }
         other => panic!("expected an error event, got {other:?}"),
     }
+}
+
+#[test]
+fn test_invalid_host_keeps_its_cause() {
+    let err = match LmStudio::new("unix:/tmp/lms.sock", 1234) {
+        Err(err) => err,
+        Ok(_) => panic!("expected an invalid host error"),
+    };
+
+    assert!(matches!(err, lms_api::Error::Host(_)), "{err:?}");
+    assert!(std::error::Error::source(&err).is_some());
 }

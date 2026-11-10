@@ -1,11 +1,11 @@
 use crate::LmStudio;
-use crate::error::ApiError;
+use crate::Result;
 use crate::models::download_status::response::DownloadStatusResponse;
 use tracing::{info, instrument};
 
 impl LmStudio {
     #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models/download/status/{job_id}"))]
-    pub async fn download_status(&self, job_id: &str) -> Result<DownloadStatusResponse, ApiError> {
+    pub async fn download_status(&self, job_id: &str) -> Result<DownloadStatusResponse> {
         info!("Get the status of model downloads");
 
         let path = format!("api/v1/models/download/status/{job_id}");

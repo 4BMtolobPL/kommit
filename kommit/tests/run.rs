@@ -241,6 +241,9 @@ fn respond_ollama_streaming(mut stream: TcpStream, gate: &StreamGate) {
 }
 
 const LM_STUDIO_MODEL: &str = "test-model";
+/// What LM Studio answers to a prompt longer than the loaded context.
+const CONTEXT_OVERFLOW_ERROR: &str =
+    "The number of tokens to keep from the initial prompt is greater than the context length.";
 
 /// A fake LM Studio server with a single downloaded model, `LM_STUDIO_MODEL`.
 struct FakeLmStudio {
@@ -255,6 +258,8 @@ struct LmStudioState {
     load_requests: usize,
     chat_requests: usize,
     download_requests: usize,
+    /// Whether every prompt is too long for the loaded context.
+    overflow_context: bool,
 }
 
 impl FakeLmStudio {
@@ -265,6 +270,7 @@ impl FakeLmStudio {
             load_requests: 0,
             chat_requests: 0,
             download_requests: 0,
+            overflow_context: false,
         })
     }
 
@@ -276,6 +282,19 @@ impl FakeLmStudio {
             load_requests: 0,
             chat_requests: 0,
             download_requests: 0,
+            overflow_context: false,
+        })
+    }
+
+    /// Starts a server whose model is loaded with a context too small for any prompt.
+    fn start_overflowing() -> Self {
+        Self::start_with(LmStudioState {
+            downloaded: true,
+            loaded_instances: 1,
+            load_requests: 0,
+            chat_requests: 0,
+            download_requests: 0,
+            overflow_context: true,
         })
     }
 
@@ -367,6 +386,24 @@ fn respond_lm_studio(mut stream: TcpStream, state: &Mutex<LmStudioState>) {
                 "status": "loaded",
             });
             write_json(&mut stream, "200 OK", &loaded);
+        }
+        "POST /api/v1/chat" if state.lock().unwrap().overflow_context => {
+            state.lock().unwrap().chat_requests += 1;
+            // LM Studio rejects a non-streamed request, but starts a stream and closes it.
+            if request["stream"] == true {
+                let start = serde_json::json!({
+                    "type": "chat.start",
+                    "model_instance_id": LM_STUDIO_MODEL,
+                });
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\nevent: chat.start\ndata: {start}\n\n"
+                )
+                .unwrap();
+            } else {
+                let error = serde_json::json!({ "error": CONTEXT_OVERFLOW_ERROR });
+                write_json(&mut stream, "500 Internal Server Error", &error);
+            }
         }
         "POST /api/v1/chat" => {
             {
@@ -598,6 +635,11 @@ impl TestRepo {
 
     /// Runs `kommit run` against `lm_studio` instead of the fake Ollama server.
     fn kommit_with_lm_studio(&self, lm_studio: &FakeLmStudio, args: &[&str]) -> Output {
+        self.kommit_with_lm_studio_port(lm_studio.port, args)
+    }
+
+    /// Runs `kommit run` against an LM Studio server on `port`.
+    fn kommit_with_lm_studio_port(&self, port: u16, args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_kommit"));
         self.isolate(&mut command, self.repo.path());
         command
@@ -609,7 +651,7 @@ impl TestRepo {
                 "127.0.0.1",
                 "--port",
             ])
-            .arg(lm_studio.port.to_string())
+            .arg(port.to_string())
             .args(args)
             .output()
             .unwrap()
@@ -1441,6 +1483,58 @@ fn lm_studio_reuses_an_already_loaded_model() {
         assert_eq!(lm_studio.chat_requests(), 3, "stream {stream}");
         assert_eq!(lm_studio.load_requests(), 0, "stream {stream}");
     }
+}
+
+#[test]
+fn lm_studio_context_overflow_reports_the_cause() {
+    for stream in ["false", "true"] {
+        let repo = TestRepo::with_commit();
+        repo.write("tracked.txt", "changed\n");
+        let lm_studio = FakeLmStudio::start_overflowing();
+
+        let output = repo.kommit_with_lm_studio(
+            &lm_studio,
+            &["--model", LM_STUDIO_MODEL, "--stream", stream],
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "stream {stream}: {output:?}");
+        let cause = if stream == "true" {
+            "--context-length"
+        } else {
+            CONTEXT_OVERFLOW_ERROR
+        };
+        assert!(
+            stderr.contains(cause),
+            "stream {stream}: stderr was {stderr}"
+        );
+        assert!(
+            !stderr.contains("Is it running?"),
+            "stream {stream}: stderr was {stderr}"
+        );
+        assert_eq!(lm_studio.chat_requests(), 1, "stream {stream}");
+    }
+}
+
+#[test]
+fn lm_studio_unreachable_server_asks_whether_it_is_running() {
+    let repo = TestRepo::with_commit();
+    repo.write("tracked.txt", "changed\n");
+    // A port nobody listens on, once the listener is dropped.
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+
+    let output = repo.kommit_with_lm_studio_port(port, &["--model", LM_STUDIO_MODEL]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr.contains("Failed to connect to LM Studio. Is it running?"),
+        "stderr was {stderr}"
+    );
 }
 
 #[test]

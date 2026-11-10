@@ -1,12 +1,12 @@
 use crate::LmStudio;
-use crate::error::ApiError;
+use crate::Result;
 use crate::models::unload::request::UnloadRequest;
 use crate::models::unload::response::UnloadResponse;
 use tracing::{info, instrument};
 
 impl LmStudio {
     #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models/unload"))]
-    pub async fn unload(&self, instance_id: &str) -> Result<String, ApiError> {
+    pub async fn unload(&self, instance_id: &str) -> Result<String> {
         info!("Unload a loaded model from memory");
 
         let url = self.endpoint("api/v1/models/unload")?;

@@ -1,7 +1,7 @@
 use crate::LmStudio;
 use crate::chat::request::ChatRequest;
 use crate::chat::stream::response::StreamEvent;
-use crate::error::ApiError;
+use crate::{Error, Result};
 use async_stream::stream;
 use std::pin::Pin;
 use tokio_stream::{Stream, StreamExt};
@@ -15,7 +15,7 @@ impl LmStudio {
     pub async fn chat_stream(
         &self,
         request: ChatRequest,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
+    ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
         info!("Send a message to a model and receive a response. Supports MCP integration.");
 
         let url = self.endpoint("api/v1/chat")?;
@@ -25,7 +25,7 @@ impl LmStudio {
         let status = res.status();
         if !status.is_success() {
             let body = res.text().await.unwrap_or_default();
-            return Err(ApiError::Status(status, body));
+            return Err(Error::Server { status, body });
         }
 
         let s = stream! {
@@ -60,7 +60,7 @@ impl LmStudio {
                                     Ok(response) => yield Ok(response),
                                     Err(e) => {
                                         error!(error = %e, data = %data, "Failed to deserialize response");
-                                        yield Err(ApiError::Other(format!("Deserialization error: {}", e)));
+                                        yield Err(Error::Decode(e));
                                     }
                                 }
                             }
@@ -68,7 +68,7 @@ impl LmStudio {
                     }
                     Err(e) => {
                         error!(error = %e, "Failed to read response");
-                        yield Err(ApiError::Request(e));
+                        yield Err(Error::Http(e));
                         break;
                     }
                 }

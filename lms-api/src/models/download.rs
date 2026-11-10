@@ -1,12 +1,12 @@
 use crate::LmStudio;
-use crate::error::ApiError;
+use crate::Result;
 use crate::models::download::request::DownloadRequest;
 use crate::models::download::response::DownloadResponse;
 use tracing::{info, instrument};
 
 impl LmStudio {
     #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models/download"))]
-    pub async fn download(&self, request: DownloadRequest) -> Result<DownloadResponse, ApiError> {
+    pub async fn download(&self, request: DownloadRequest) -> Result<DownloadResponse> {
         info!("Download LLMs and embedding models");
 
         let url = self.endpoint("api/v1/models/download")?;

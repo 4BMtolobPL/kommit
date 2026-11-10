@@ -4,13 +4,13 @@ pub mod load;
 pub mod unload;
 
 use crate::LmStudio;
-use crate::error::ApiError;
+use crate::Result;
 use crate::models::response::{Model, ModelsResponse};
 use tracing::{info, instrument};
 
 impl LmStudio {
     #[instrument(skip(self), fields(url = %self.url, endpoint = "/api/v1/models"))]
-    pub async fn models(&self) -> Result<Vec<Model>, ApiError> {
+    pub async fn models(&self) -> Result<Vec<Model>> {
         info!(
             "Get a list of available models on your system, including both LLMs and embedding models."
         );
