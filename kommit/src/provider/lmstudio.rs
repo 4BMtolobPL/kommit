@@ -49,11 +49,7 @@ impl LmStudioClient {
             return Ok(());
         }
 
-        let models = self
-            .lms
-            .models()
-            .await
-            .context("Failed to connect to LmStudio. Is it running?")?;
+        let models = self.lms.models().await.map_err(map_lms_error)?;
         let Some(found) = find_model(&models, model) else {
             return Err(missing_model_error(
                 self.name(),
@@ -91,6 +87,47 @@ fn find_model<'a>(models: &'a [Model], model: &str) -> Option<&'a Model> {
     })
 }
 
+/// Turns an LM Studio API error into a message for the user.
+///
+/// Only a failure to reach the server suggests that LM Studio is not running; an error
+/// the server sent back is shown with its own explanation.
+fn map_lms_error(err: lms_api::Error) -> anyhow::Error {
+    match err {
+        lms_api::Error::Http(e) if e.is_connect() || e.is_timeout() => {
+            anyhow::anyhow!("Failed to connect to LM Studio. Is it running? (Error: {e})")
+        }
+        lms_api::Error::Server { status, body } => match server_message(&body) {
+            Some(message) => anyhow::anyhow!("LM Studio returned an error ({status}): {message}"),
+            None => anyhow::anyhow!("LM Studio returned an error ({status})"),
+        },
+        other => anyhow::anyhow!(other),
+    }
+}
+
+/// The explanation in an error body: `{"error": {"message": ...}}`, `{"error": "..."}`,
+/// or the body itself when it is not one of those.
+fn server_message(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        let error = &value["error"];
+        if let Some(message) = error["message"].as_str().or_else(|| error.as_str()) {
+            return Some(message.to_owned());
+        }
+    }
+    Some(body.to_owned())
+}
+
+/// The error for a stream that closed without finishing the response, which LM Studio
+/// does when the prompt does not fit in the context the model is loaded with.
+fn unfinished_stream_error(model: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "LM Studio closed the stream before the response finished. The prompt was likely too long for the context length the model is loaded with. Load the model with a larger context (e.g. `lms load {model} --context-length 8192`) and try again."
+    )
+}
+
 #[async_trait]
 impl ProviderStrategy for LmStudioClient {
     fn name(&self) -> &'static str {
@@ -102,11 +139,7 @@ impl ProviderStrategy for LmStudioClient {
     }
 
     async fn is_model_installed(&self, model: &str) -> anyhow::Result<bool> {
-        let models = self
-            .lms
-            .models()
-            .await
-            .context("Failed to connect to LmStudio. Is it running?")?;
+        let models = self.lms.models().await.map_err(map_lms_error)?;
         Ok(find_model(&models, model).is_some())
     }
 
@@ -202,7 +235,7 @@ impl ProviderStrategy for LmStudioClient {
             .lms
             .chat(builder.model(model).input(prompt).build()?)
             .await
-            .context("Failed to connect to LmStudio. Is it running?")?;
+            .map_err(map_lms_error)?;
 
         let output = res.output;
 
@@ -243,9 +276,11 @@ impl ProviderStrategy for LmStudioClient {
             .lms
             .chat_stream(builder.model(model).input(prompt).build()?)
             .await
-            .context("Failed to connect to LmStudio. Is it running?")?;
+            .map_err(map_lms_error)?;
 
+        let model = model.to_owned();
         let s = stream! {
+            let mut finished = false;
             while let Some(res) = stream.next().await {
                 let responses = match res {
                     Ok(r) => r,
@@ -280,8 +315,12 @@ impl ProviderStrategy for LmStudioClient {
                         ));
                         return;
                     }
+                    StreamEvent::ChatEnd { .. } => finished = true,
                     _ => continue,
                 }
+            }
+            if !finished {
+                yield Err(unfinished_stream_error(&model));
             }
         };
 
@@ -298,5 +337,53 @@ impl From<ThinkType> for lms_api::types::AllowedOptions {
             ThinkType::Medium => lms_api::types::AllowedOptions::Medium,
             ThinkType::High => lms_api::types::AllowedOptions::High,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lms_api::error::StatusCode;
+
+    fn status_error(body: &str) -> String {
+        map_lms_error(lms_api::Error::Server {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: body.to_owned(),
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn error_object_message_is_shown() {
+        let message = status_error(r#"{"error":{"type":"unknown","message":"too many tokens"}}"#);
+        assert_eq!(
+            message,
+            "LM Studio returned an error (500 Internal Server Error): too many tokens"
+        );
+    }
+
+    #[test]
+    fn error_string_is_shown() {
+        let message = status_error(r#"{"error":"too many tokens"}"#);
+        assert!(message.ends_with(": too many tokens"), "{message}");
+    }
+
+    #[test]
+    fn plain_body_is_shown_as_sent() {
+        let message = status_error("  too many tokens\n");
+        assert!(message.ends_with(": too many tokens"), "{message}");
+    }
+
+    #[test]
+    fn empty_body_shows_only_the_status() {
+        assert_eq!(
+            status_error(""),
+            "LM Studio returned an error (500 Internal Server Error)"
+        );
+    }
+
+    #[test]
+    fn server_errors_do_not_suggest_that_lm_studio_is_down() {
+        assert!(!status_error(r#"{"error":"boom"}"#).contains("Is it running?"));
     }
 }
