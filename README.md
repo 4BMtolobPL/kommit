@@ -88,14 +88,16 @@ kommit run | pbcopy
 | `-m, --model`    | 사용할 LLM 모델 명칭을 지정합니다.                                              | `gemma4` |
 | `-l, --lang`     | 메시지 언어를 지정합니다. (`en`, `ko`)                                        | `en`     |
 | `--provider`     | AI 프로바이더를 지정합니다. (`ollama`, `lm-studio`)                           | `ollama` |
-| `-s, --stream`   | 스트리밍 응답 활성화 여부를 지정합니다.                                             | `false`  |
-| `-t, --think`    | 추론(Thinking) 레벨을 지정합니다. (`true`, `false`, `low`, `medium`, `high`) | `false`  |
+| `-s, --stream [<BOOL>]` | 스트리밍 응답을 켭니다. 값 없이 쓰면 `true`이며, `--stream false`로 설정 파일의 값을 끌 수 있습니다. | `false`  |
+| `-t, --think <TYPE>` | 추론(Thinking) 레벨을 지정합니다. (`true`, `false`, `low`, `medium`, `high`) 지정하지 않으면 요청에 포함하지 않아 모델의 기본 동작을 따릅니다. | `None`   |
 | `-c, --commit`   | 메시지 생성 후 자동으로 `git commit`을 수행합니다.                               | `false`  |
 | `-p, --push`     | 커밋 후 자동으로 `git push`를 수행합니다. `--commit`을 포함하므로 함께 지정하지 않아도 됩니다. | `false`  |
 | `-e, --edit`     | 커밋 전 메시지를 수정할 수 있도록 편집기를 엽니다. `--commit` 또는 `--push`와 함께 사용해야 합니다. | `false`  |
 | `-y, --yes`      | 추적되지 않은 새 파일을 확인 없이 포함합니다.                                       | `false`  |
 | `--host`         | LLM 서버의 호스트 주소를 지정합니다. 포트를 포함할 수 있습니다. (`127.0.0.1:18434`, `http://host:8080`) | `None`   |
 | `--port`         | LLM 서버의 포트 번호를 지정합니다.                                              | `None`   |
+
+기본값은 명령행 옵션과 설정 파일(`config.toml`) 어느 쪽에도 값이 없을 때만 적용됩니다.
 
 ### 2. 설정 관리 (`config`)
 

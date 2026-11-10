@@ -29,15 +29,21 @@ pub(crate) struct RunArgs {
     pub(crate) model: Option<String>,
 
     /// Language for writing commit messages
-    #[arg(long)]
+    #[arg(short, long)]
     pub(crate) lang: Option<ResponseLang>,
 
     /// LLM provider
     #[arg(long)]
     pub(crate) provider: Option<LlmProvider>,
 
-    /// Enable or disable streaming response
-    #[arg(short, long, value_name = "BOOL")]
+    /// Enable or disable streaming response (`--stream` alone means true)
+    #[arg(
+        short,
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
     pub(crate) stream: Option<bool>,
 
     /// Thinking type or level
@@ -112,4 +118,62 @@ pub(crate) enum ConfigItem {
     Port {
         value: u16,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_run(args: &[&str]) -> Result<RunArgs, clap::Error> {
+        let argv = ["kommit", "run"].iter().chain(args).copied();
+        match Cli::try_parse_from(argv)?.command {
+            Commands::Run(run) => Ok(run),
+            Commands::Config(_) => unreachable!("parsed the run subcommand"),
+        }
+    }
+
+    #[test]
+    fn stream_without_a_value_enables_streaming() {
+        assert_eq!(parse_run(&["--stream"]).unwrap().stream, Some(true));
+        assert_eq!(parse_run(&["-s"]).unwrap().stream, Some(true));
+    }
+
+    #[test]
+    fn stream_accepts_an_explicit_value() {
+        assert_eq!(parse_run(&["--stream", "true"]).unwrap().stream, Some(true));
+        assert_eq!(
+            parse_run(&["--stream", "false"]).unwrap().stream,
+            Some(false)
+        );
+        assert_eq!(parse_run(&["-s", "false"]).unwrap().stream, Some(false));
+    }
+
+    #[test]
+    fn stream_is_unset_when_omitted() {
+        assert_eq!(parse_run(&[]).unwrap().stream, None);
+    }
+
+    #[test]
+    fn stream_without_a_value_does_not_consume_the_next_flag() {
+        let args = parse_run(&["-s", "--commit"]).unwrap();
+        assert_eq!(args.stream, Some(true));
+        assert!(args.commit);
+    }
+
+    #[test]
+    fn stream_rejects_a_non_boolean_value() {
+        assert!(parse_run(&["--stream", "yes"]).is_err());
+    }
+
+    #[test]
+    fn lang_accepts_the_short_option() {
+        assert!(matches!(
+            parse_run(&["-l", "ko"]).unwrap().lang,
+            Some(ResponseLang::Ko)
+        ));
+        assert!(matches!(
+            parse_run(&["--lang", "en"]).unwrap().lang,
+            Some(ResponseLang::En)
+        ));
+    }
 }
