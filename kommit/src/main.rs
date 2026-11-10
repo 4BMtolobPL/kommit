@@ -75,6 +75,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         .unwrap_or(ResponseLang::En);
     let stream_enabled = args.stream.or(config.stream).unwrap_or(false);
     let think = args.think.or(config.think.clone());
+    let context_length = args.context_length.or(config.context_length);
     let (url, port) = resolve_endpoint(
         &provider,
         args.host.as_deref(),
@@ -98,14 +99,15 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     // Only once there is something to send, so that nothing is downloaded in vain.
     prepare_model(client.as_ref(), &model, args.pull).await?;
-    let budget = InputBudget::default();
+    let budget = decide_budget(client.as_ref(), &model, context_length).await?;
 
     let diff_len = diff.len();
     info!(diff_len, ?budget, "Processing diff");
 
     let prompt = if diff_len > budget.prompt_bytes {
         warn(&format!(
-            "⚠️ Large diff detected ({diff_len} bytes). Switching to 2-Step Generation."
+            "⚠️ Large diff detected ({diff_len} bytes, over {} for one prompt). Switching to 2-Step Generation.",
+            budget.prompt_bytes
         ));
         let chunks = split_diff(&diff);
         let summaries = generate_summary_for_chunks(
@@ -302,6 +304,22 @@ async fn prepare_model(
     client.download_model(model).await
 }
 
+/// The budget for `model`, sized by the context length the user set, or else the one the
+/// provider reports. Without either, the fixed default.
+async fn decide_budget(
+    client: &dyn ProviderStrategy,
+    model: &str,
+    configured: Option<u32>,
+) -> anyhow::Result<InputBudget> {
+    let (context_length, source) = match configured {
+        Some(tokens) => (Some(tokens), "configured"),
+        None => (client.context_length(model).await?, "provider"),
+    };
+    let budget = context_length.map_or_else(InputBudget::default, InputBudget::from_context_length);
+    info!(?context_length, source, ?budget, "Sized the input budget");
+    Ok(budget)
+}
+
 /// Asks on stderr whether to download a missing model, failing unless the answer is yes.
 /// Without a terminal it fails right away, since the download may take several gigabytes.
 fn confirm_download(
@@ -408,6 +426,7 @@ fn config(args: ConfigArgs) -> anyhow::Result<()> {
                 ConfigItem::Think { value } => config.think = Some(value),
                 ConfigItem::Host { value } => config.host = Some(value),
                 ConfigItem::Port { value } => config.port = Some(value),
+                ConfigItem::ContextLength { value } => config.context_length = Some(value),
             }
             config.save()?;
             println!("Configuration updated successfully.");

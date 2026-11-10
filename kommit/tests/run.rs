@@ -260,7 +260,12 @@ struct LmStudioState {
     download_requests: usize,
     /// Whether every prompt is too long for the loaded context.
     overflow_context: bool,
+    /// The context length every instance is loaded with.
+    context_length: u32,
 }
+
+/// Sized so that `make_large_diff` still takes the 2-step path without truncating a chunk.
+const LM_STUDIO_CONTEXT_LENGTH: u32 = 8192;
 
 impl FakeLmStudio {
     fn start(loaded: bool) -> Self {
@@ -271,6 +276,7 @@ impl FakeLmStudio {
             chat_requests: 0,
             download_requests: 0,
             overflow_context: false,
+            context_length: LM_STUDIO_CONTEXT_LENGTH,
         })
     }
 
@@ -283,6 +289,7 @@ impl FakeLmStudio {
             chat_requests: 0,
             download_requests: 0,
             overflow_context: false,
+            context_length: LM_STUDIO_CONTEXT_LENGTH,
         })
     }
 
@@ -295,6 +302,20 @@ impl FakeLmStudio {
             chat_requests: 0,
             download_requests: 0,
             overflow_context: true,
+            context_length: LM_STUDIO_CONTEXT_LENGTH,
+        })
+    }
+
+    /// Starts a server whose model is loaded with a context of `tokens` tokens.
+    fn start_with_context(tokens: u32) -> Self {
+        Self::start_with(LmStudioState {
+            downloaded: true,
+            loaded_instances: 1,
+            load_requests: 0,
+            chat_requests: 0,
+            download_requests: 0,
+            overflow_context: false,
+            context_length: tokens,
         })
     }
 
@@ -351,7 +372,10 @@ fn respond_lm_studio(mut stream: TcpStream, state: &Mutex<LmStudioState>) {
             write_json(&mut stream, "200 OK", &finished);
         }
         "GET /api/v1/models" => {
-            let loaded_instances = state.lock().unwrap().loaded_instances;
+            let (loaded_instances, context_length) = {
+                let state = state.lock().unwrap();
+                (state.loaded_instances, state.context_length)
+            };
             let instances: Vec<Value> = (0..loaded_instances)
                 .map(|i| {
                     let id = if i == 0 {
@@ -359,7 +383,7 @@ fn respond_lm_studio(mut stream: TcpStream, state: &Mutex<LmStudioState>) {
                     } else {
                         format!("{LM_STUDIO_MODEL}:{}", i + 1)
                     };
-                    serde_json::json!({ "id": id, "config": { "context_length": 4096 } })
+                    serde_json::json!({ "id": id, "config": { "context_length": context_length } })
                 })
                 .collect();
             let models = serde_json::json!({
@@ -370,7 +394,7 @@ fn respond_lm_studio(mut stream: TcpStream, state: &Mutex<LmStudioState>) {
                     "display_name": "Test Model",
                     "size_bytes": 1,
                     "loaded_instances": instances,
-                    "max_context_length": 4096,
+                    "max_context_length": 131072,
                 }]
             });
             write_json(&mut stream, "200 OK", &models);
@@ -631,6 +655,13 @@ impl TestRepo {
         let content = format!("{}\n", "x".repeat(80)).repeat(110);
         self.write("tracked.txt", &content);
         self.write("other/file.txt", &content);
+    }
+
+    /// Changes one file by about 7 KB: one prompt for the default budget, but too much for a
+    /// model loaded with a context of 4096 tokens.
+    fn make_medium_diff(&self) {
+        let content = format!("{}\n", "x".repeat(80)).repeat(85);
+        self.write("tracked.txt", &content);
     }
 
     /// Runs `kommit run` against `lm_studio` instead of the fake Ollama server.
@@ -1486,6 +1517,41 @@ fn lm_studio_reuses_an_already_loaded_model() {
 }
 
 #[test]
+fn lm_studio_context_length_sizes_the_prompt() {
+    for (context_length, chat_requests) in [(4096, 2), (LM_STUDIO_CONTEXT_LENGTH, 1)] {
+        let repo = TestRepo::with_commit();
+        repo.make_medium_diff();
+        let lm_studio = FakeLmStudio::start_with_context(context_length);
+
+        let output = repo.kommit_with_lm_studio(&lm_studio, &["--model", LM_STUDIO_MODEL]);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{context_length}: {output:?}");
+        assert_eq!(
+            stderr.contains("Large diff detected"),
+            chat_requests > 1,
+            "{context_length}: {stderr}"
+        );
+        assert_eq!(lm_studio.chat_requests(), chat_requests, "{context_length}");
+    }
+}
+
+#[test]
+fn lm_studio_context_length_option_overrides_the_loaded_one() {
+    let repo = TestRepo::with_commit();
+    repo.make_medium_diff();
+    let lm_studio = FakeLmStudio::start_with_context(LM_STUDIO_CONTEXT_LENGTH);
+
+    let output = repo.kommit_with_lm_studio(
+        &lm_studio,
+        &["--model", LM_STUDIO_MODEL, "--context-length", "4096"],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(lm_studio.chat_requests(), 2);
+}
+
+#[test]
 fn lm_studio_context_overflow_reports_the_cause() {
     for stream in ["false", "true"] {
         let repo = TestRepo::with_commit();
@@ -1582,6 +1648,54 @@ fn ollama_unknown_model_stops_before_the_llm() {
         assert!(repo.ollama.prompts().is_empty(), "stream {stream}");
         assert_eq!(repo.ollama.pull_requests(), 0, "stream {stream}");
     }
+}
+
+/// Counts the prompts that summarize a chunk, which only the 2-step path sends.
+fn summary_prompts(prompts: &[String]) -> usize {
+    prompts
+        .iter()
+        .filter(|prompt| prompt.contains("git diff chunk"))
+        .count()
+}
+
+#[test]
+fn ollama_uses_the_default_budget_without_a_context_length() {
+    let repo = TestRepo::with_commit();
+    repo.make_medium_diff();
+
+    let output = repo.kommit(&[]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(summary_prompts(&repo.ollama.prompts()), 0);
+}
+
+#[test]
+fn context_length_option_sizes_the_prompt_for_ollama() {
+    let repo = TestRepo::with_commit();
+    repo.make_medium_diff();
+
+    let output = repo.kommit(&["--context-length", "4096"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        stderr.contains("Large diff detected"),
+        "stderr was {stderr}"
+    );
+    assert_eq!(summary_prompts(&repo.ollama.prompts()), 1);
+}
+
+#[test]
+fn configured_context_length_sizes_the_prompt() {
+    let repo = TestRepo::with_commit();
+    repo.make_medium_diff();
+    let set = repo.kommit_config(&["set", "context-length", "4096"]);
+    assert!(set.status.success(), "config set: {set:?}");
+
+    let output = repo.kommit(&[]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(summary_prompts(&repo.ollama.prompts()), 1);
 }
 
 /// A large diff sends one generate request per chunk plus one for the message, but the

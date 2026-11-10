@@ -18,6 +18,8 @@ pub(crate) struct Config {
     pub(crate) think: Option<ThinkType>,
     pub(crate) host: Option<String>,
     pub(crate) port: Option<u16>,
+    /// Context length in tokens the model is loaded with.
+    pub(crate) context_length: Option<u32>,
     pub(crate) exclude_patterns: Option<Vec<String>>,
 }
 
@@ -106,9 +108,11 @@ mod tests {
 
     #[test]
     fn valid_file_is_loaded() {
-        let (_dir, _path, result) =
-            load_str("model = \"llama\"\nport = 1234\nexclude_patterns = [\"*.min.js\"]\n");
+        let (_dir, _path, result) = load_str(
+            "model = \"llama\"\nport = 1234\ncontext_length = 4096\nexclude_patterns = [\"*.min.js\"]\n",
+        );
         let config = result.unwrap();
+        assert_eq!(config.context_length, Some(4096));
         assert_eq!(config.model.as_deref(), Some("llama"));
         assert_eq!(config.port, Some(1234));
         assert_eq!(config.exclude_patterns, Some(vec!["*.min.js".to_string()]));

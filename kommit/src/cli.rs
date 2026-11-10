@@ -77,6 +77,11 @@ pub(crate) struct RunArgs {
     /// Download the model without asking if it is not installed
     #[arg(long)]
     pub(crate) pull: bool,
+
+    /// Context length in tokens the model is loaded with, to size the prompt by
+    /// (detected from LM Studio when omitted)
+    #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) context_length: Option<u32>,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -121,6 +126,10 @@ pub(crate) enum ConfigItem {
     },
     Port {
         value: u16,
+    },
+    ContextLength {
+        #[arg(value_parser = clap::value_parser!(u32).range(1..))]
+        value: u32,
     },
 }
 
@@ -176,6 +185,18 @@ mod tests {
         assert!(!args.yes);
         assert!(!parse_run(&["--yes"]).unwrap().pull);
         assert!(!parse_run(&[]).unwrap().pull);
+    }
+
+    #[test]
+    fn context_length_must_be_positive() {
+        assert_eq!(
+            parse_run(&["--context-length", "4096"])
+                .unwrap()
+                .context_length,
+            Some(4096)
+        );
+        assert!(parse_run(&["--context-length", "0"]).is_err());
+        assert_eq!(parse_run(&[]).unwrap().context_length, None);
     }
 
     #[test]

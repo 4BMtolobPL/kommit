@@ -143,6 +143,12 @@ impl ProviderStrategy for OllamaClient {
         Ok(())
     }
 
+    /// Unknown: Ollama loads a model with a context length the server decides, which the
+    /// model details do not report.
+    async fn context_length(&self, _model: &str) -> anyhow::Result<Option<u32>> {
+        Ok(None)
+    }
+
     #[instrument(skip(self, prompt))]
     async fn generate(
         &self,
