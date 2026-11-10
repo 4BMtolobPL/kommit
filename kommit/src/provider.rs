@@ -60,6 +60,9 @@ pub(crate) trait ProviderStrategy {
     async fn is_model_installed(&self, model: &str) -> anyhow::Result<bool>;
     /// Downloads `model`, reporting progress on stderr.
     async fn download_model(&self, model: &str) -> anyhow::Result<()>;
+    /// The context length in tokens that `model` will answer with, if the provider tells.
+    /// May load the model, so it is called only once the model is installed.
+    async fn context_length(&self, model: &str) -> anyhow::Result<Option<u32>>;
     async fn generate(
         &self,
         model: &str,

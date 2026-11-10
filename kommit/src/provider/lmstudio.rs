@@ -87,6 +87,19 @@ fn find_model<'a>(models: &'a [Model], model: &str) -> Option<&'a Model> {
     })
 }
 
+/// The context length `model` is loaded with: that of the instance it names, or else the
+/// smallest of its instances, since a request may go to any of them.
+fn loaded_context_length(model: &Model, name: &str) -> Option<u32> {
+    let instances = &model.loaded_instances;
+    match instances.iter().find(|instance| instance.id == name) {
+        Some(instance) => Some(instance.config.context_length),
+        None => instances
+            .iter()
+            .map(|instance| instance.config.context_length)
+            .min(),
+    }
+}
+
 /// Turns an LM Studio API error into a message for the user.
 ///
 /// Only a failure to reach the server suggests that LM Studio is not running; an error
@@ -212,6 +225,14 @@ impl ProviderStrategy for LmStudioClient {
             );
         }
         Ok(())
+    }
+
+    /// The context length of the loaded instance. A request never sets one, since LM Studio
+    /// would then reload the model at that length.
+    async fn context_length(&self, model: &str) -> anyhow::Result<Option<u32>> {
+        self.ensure_loaded(model).await?;
+        let models = self.lms.models().await.map_err(map_lms_error)?;
+        Ok(find_model(&models, model).and_then(|found| loaded_context_length(found, model)))
     }
 
     #[instrument(skip(self, prompt))]
@@ -351,6 +372,44 @@ mod tests {
             body: body.to_owned(),
         })
         .to_string()
+    }
+
+    fn model_with_instances(contexts: &[(&str, u32)]) -> Model {
+        let instances: Vec<serde_json::Value> = contexts
+            .iter()
+            .map(|(id, context_length)| {
+                serde_json::json!({ "id": id, "config": { "context_length": context_length } })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "type": "llm",
+            "publisher": "test",
+            "key": "model",
+            "display_name": "Model",
+            "size_bytes": 1,
+            "loaded_instances": instances,
+            "max_context_length": 131072,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_instance_id_uses_that_instance() {
+        let model = model_with_instances(&[("model", 8192), ("model:2", 4096)]);
+        assert_eq!(loaded_context_length(&model, "model"), Some(8192));
+        assert_eq!(loaded_context_length(&model, "model:2"), Some(4096));
+    }
+
+    #[test]
+    fn a_key_uses_the_smallest_instance() {
+        let model = model_with_instances(&[("model:2", 8192), ("model:3", 4096)]);
+        assert_eq!(loaded_context_length(&model, "model"), Some(4096));
+    }
+
+    #[test]
+    fn an_unloaded_model_has_no_context_length() {
+        let model = model_with_instances(&[]);
+        assert_eq!(loaded_context_length(&model, "model"), None);
     }
 
     #[test]
