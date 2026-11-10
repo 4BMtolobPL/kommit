@@ -1,17 +1,27 @@
-use crate::provider::{LlmStream, ProviderStrategy, StreamResponse, ThinkType};
+use crate::provider::{
+    LlmStream, ProviderStrategy, StreamResponse, ThinkType, download_style, missing_model_error,
+};
 use anyhow::{Context, bail};
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
+use indicatif::ProgressBar;
 use lms_api::chat::request::ChatRequestBuilder;
 use lms_api::chat::response::Output;
 use lms_api::chat::stream::response::StreamEvent;
+use lms_api::models::download::request::DownloadRequestBuilder;
+use lms_api::models::response::Model;
+use lms_api::types::DownloadStatus;
 use lms_api::{LmStudio, models::load::request::LoadRequestBuilder};
 use std::collections::HashSet;
 use std::fmt::Write;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, instrument, trace};
 use url::Url;
+
+/// How often a running download is checked.
+const DOWNLOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 pub(crate) struct LmStudioClient {
@@ -44,16 +54,12 @@ impl LmStudioClient {
             .models()
             .await
             .context("Failed to connect to LmStudio. Is it running?")?;
-        let found = models.iter().find(|m| {
-            m.key == model
-                || m.loaded_instances
-                    .iter()
-                    .any(|instance| instance.id == model)
-        });
-        let Some(found) = found else {
-            bail!(
-                "Model '{model}' was not found in LM Studio. Download it first (e.g. `lms get {model}`) or check the model name."
-            );
+        let Some(found) = find_model(&models, model) else {
+            return Err(missing_model_error(
+                self.name(),
+                model,
+                &self.download_command(model),
+            ));
         };
 
         if found.loaded_instances.is_empty() {
@@ -75,8 +81,106 @@ impl LmStudioClient {
     }
 }
 
+/// Finds `model` by its key or by the id of one of its loaded instances.
+fn find_model<'a>(models: &'a [Model], model: &str) -> Option<&'a Model> {
+    models.iter().find(|m| {
+        m.key == model
+            || m.loaded_instances
+                .iter()
+                .any(|instance| instance.id == model)
+    })
+}
+
 #[async_trait]
 impl ProviderStrategy for LmStudioClient {
+    fn name(&self) -> &'static str {
+        "LM Studio"
+    }
+
+    fn download_command(&self, model: &str) -> String {
+        format!("lms get {model}")
+    }
+
+    async fn is_model_installed(&self, model: &str) -> anyhow::Result<bool> {
+        let models = self
+            .lms
+            .models()
+            .await
+            .context("Failed to connect to LmStudio. Is it running?")?;
+        Ok(find_model(&models, model).is_some())
+    }
+
+    #[instrument(skip(self))]
+    async fn download_model(&self, model: &str) -> anyhow::Result<()> {
+        info!("Downloading model");
+        let request = DownloadRequestBuilder::default()
+            .model(model)
+            .build()
+            .context("failed to build download request")?;
+        let started = self
+            .lms
+            .download(request)
+            .await
+            .context("Failed to start downloading the model")?;
+
+        eprintln!("Downloading model '{model}' with LM Studio...");
+        let bar = ProgressBar::new(started.total_size_bytes.unwrap_or(0))
+            .with_style(download_style())
+            .with_message("downloading");
+        let mut status = started.status;
+        loop {
+            match status {
+                DownloadStatus::Completed | DownloadStatus::AlreadyDownloaded => break,
+                DownloadStatus::Downloading | DownloadStatus::Paused => {
+                    let Some(job_id) = started.job_id.as_deref() else {
+                        bar.abandon();
+                        bail!(
+                            "LM Studio did not return a job to follow the download of '{model}'."
+                        );
+                    };
+                    tokio::time::sleep(DOWNLOAD_POLL_INTERVAL).await;
+                    let job = match self.lms.download_status(job_id).await {
+                        Ok(job) => job,
+                        Err(e) => {
+                            bar.abandon();
+                            return Err(e).context("Failed to get the download status");
+                        }
+                    };
+                    status = job.status;
+                    if let Some(total) = job.total_size_bytes {
+                        bar.set_length(total);
+                    }
+                    if let Some(downloaded) = job.downloaded_bytes {
+                        bar.set_position(downloaded);
+                    }
+                    bar.set_message(if status == DownloadStatus::Paused {
+                        "paused"
+                    } else {
+                        "downloading"
+                    });
+                }
+                DownloadStatus::Failed => {
+                    bar.abandon();
+                    bail!("LM Studio failed to download model '{model}'.")
+                }
+                DownloadStatus::Unknown => {
+                    bar.abandon();
+                    bail!("LM Studio reported an unknown status while downloading '{model}'.")
+                }
+            }
+        }
+        bar.finish();
+        eprintln!("Downloaded model '{model}'.");
+
+        // A catalog name may be listed under a different key once downloaded.
+        if !self.is_model_installed(model).await? {
+            bail!(
+                "LM Studio downloaded '{model}', but lists no model with that key. Check the key with `lms ls` and pass it with --model."
+            );
+        }
+        Ok(())
+    }
+
     #[instrument(skip(self, prompt))]
     async fn generate(
         &self,

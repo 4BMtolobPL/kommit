@@ -16,7 +16,9 @@ use crate::prompt::{
     COMMIT_TYPES, ResponseLang, build_commit_from_summaries_prompt, build_prompt,
     build_summary_prompt,
 };
-use crate::provider::{LlmProvider, StreamResponse, create_client};
+use crate::provider::{
+    LlmProvider, ProviderStrategy, StreamResponse, create_client, missing_model_error,
+};
 use anyhow::{Context, anyhow, bail};
 use clap::Parser;
 use futures::StreamExt;
@@ -91,6 +93,9 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     }
     let diff = reviewed.diff;
     let branch = get_current_branch().ok();
+
+    // Only once there is something to send, so that nothing is downloaded in vain.
+    prepare_model(client.as_ref(), &model, args.pull).await?;
 
     let diff_len = diff.len();
     info!(diff_len, "Processing diff");
@@ -264,14 +269,75 @@ fn confirm_untracked(
     stderr.flush()?;
     drop(stderr);
 
-    let mut answer = String::new();
-    input.read_line(&mut answer)?;
-    let answer = answer.trim();
-    if answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes") {
+    if read_yes(input)? {
         Ok(())
     } else {
         bail!("Aborted: untracked files were not included.")
     }
+}
+
+/// Makes sure `model` is installed, downloading it with `--pull` or once the user agrees.
+async fn prepare_model(
+    client: &dyn ProviderStrategy,
+    model: &str,
+    pull: bool,
+) -> anyhow::Result<()> {
+    if client.is_model_installed(model).await? {
+        return Ok(());
+    }
+    if !pull {
+        let stdin = io::stdin();
+        confirm_download(
+            client.name(),
+            model,
+            &client.download_command(model),
+            stdin.is_terminal(),
+            &mut stdin.lock(),
+        )?;
+    }
+    client.download_model(model).await
+}
+
+/// Asks on stderr whether to download a missing model, failing unless the answer is yes.
+/// Without a terminal it fails right away, since the download may take several gigabytes.
+fn confirm_download(
+    provider: &str,
+    model: &str,
+    download_command: &str,
+    is_terminal: bool,
+    input: &mut impl BufRead,
+) -> anyhow::Result<()> {
+    if !is_terminal {
+        return Err(missing_model_error(provider, model, download_command));
+    }
+
+    let mut stderr = io::stderr().lock();
+    writeln!(
+        stderr,
+        "{}",
+        format!("Model '{model}' is not installed in {provider}.")
+            .if_supports_color(Stream::Stderr, |text| text.yellow())
+    )?;
+    write!(
+        stderr,
+        "Download it now? This may take several gigabytes. [y/N] "
+    )?;
+    stderr.flush()?;
+    drop(stderr);
+
+    if read_yes(input)? {
+        Ok(())
+    } else {
+        bail!("Aborted: model '{model}' was not downloaded.")
+    }
+}
+
+/// Reads one answer to a `[y/N]` question, which is yes only for "y" or "yes".
+fn read_yes(input: &mut impl BufRead) -> io::Result<bool> {
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    let answer = answer.trim();
+    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
 /// Prints the message that failed to be committed so the user can reuse it.
@@ -488,6 +554,38 @@ mod tests {
         let error = confirm(b"y\n", false).unwrap_err().to_string();
         assert!(error.contains(".env"), "{error}");
         assert!(error.contains("--yes"), "{error}");
+    }
+
+    fn confirm_model(input: &[u8], is_terminal: bool) -> anyhow::Result<()> {
+        confirm_download(
+            "Ollama",
+            "missing",
+            "ollama pull missing",
+            is_terminal,
+            &mut io::Cursor::new(input),
+        )
+    }
+
+    #[test]
+    fn missing_model_is_downloaded_only_on_yes() {
+        for input in [&b"y\n"[..], b"YES\n", b" Yes "] {
+            assert!(confirm_model(input, true).is_ok(), "{input:?}");
+        }
+        for input in [&b"n\n"[..], b"\n", b"", b"yess\n"] {
+            let error = confirm_model(input, true).unwrap_err().to_string();
+            assert_eq!(error, "Aborted: model 'missing' was not downloaded.");
+        }
+    }
+
+    #[test]
+    fn missing_model_without_a_terminal_needs_pull() {
+        let error = confirm_model(b"y\n", false).unwrap_err().to_string();
+        assert!(
+            error.contains("Model 'missing' was not found in Ollama"),
+            "{error}"
+        );
+        assert!(error.contains("--pull"), "{error}");
+        assert!(error.contains("ollama pull missing"), "{error}");
     }
 
     #[test]
