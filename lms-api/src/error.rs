@@ -18,6 +18,10 @@ pub enum Error {
     #[error("invalid url: {0}")]
     Url(#[from] url::ParseError),
 
+    /// The host could not be used as the base URL of the API.
+    #[error("invalid host: {0}")]
+    Host(#[source] reqwest::Error),
+
     #[error("invalid configuration: {0}")]
     Config(String),
 }

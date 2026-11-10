@@ -83,3 +83,14 @@ async fn test_chat_stream_error_event() {
         other => panic!("expected an error event, got {other:?}"),
     }
 }
+
+#[test]
+fn test_invalid_host_keeps_its_cause() {
+    let err = match LmStudio::new("unix:/tmp/lms.sock", 1234) {
+        Err(err) => err,
+        Ok(_) => panic!("expected an invalid host error"),
+    };
+
+    assert!(matches!(err, lms_api::Error::Host(_)), "{err:?}");
+    assert!(std::error::Error::source(&err).is_some());
+}

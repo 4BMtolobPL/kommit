@@ -16,7 +16,7 @@ pub struct LmStudio {
 
 impl LmStudio {
     pub fn new(host: impl IntoUrl, port: u16) -> Result<Self> {
-        let mut url = host.into_url().map_err(|e| Error::Config(e.to_string()))?;
+        let mut url = host.into_url().map_err(Error::Host)?;
 
         url.set_port(Some(port))
             .map_err(|_| Error::Config("Could not set port".to_string()))?;
