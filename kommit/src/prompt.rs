@@ -29,12 +29,26 @@ Diff:
     )
 }
 
-pub(crate) fn build_summary_prompt(diff_chunk: &str, lang: ResponseLang) -> String {
+/// Asks for a summary of `diff_chunk` of about `max_chars` characters at most, so that
+/// the summaries of every chunk fit in the prompt that writes the commit message.
+pub(crate) fn build_summary_prompt(
+    diff_chunk: &str,
+    lang: ResponseLang,
+    max_chars: usize,
+) -> String {
     format!(
         r#"
 You are an expert developer.
 Analyze the following git diff chunk and write a concise, bullet-pointed summary of the changes.
 Focus on WHAT changed and WHY.
+
+Rules:
+- Name the changed file in the summary
+- Write each bullet point on a single line
+- Do not restate the code: no function bodies, expressions, or lists of values
+- No headings, bold text, or nested bullet points such as "Why:"
+- Do not repeat yourself
+- Keep the whole summary under about {2} characters
 
 - Language: {0}
 
@@ -43,7 +57,7 @@ Diff Chunk:
 
 Summary (Output only the bullet points in the requested language):
 "#,
-        lang, diff_chunk
+        lang, diff_chunk, max_chars
     )
 }
 
@@ -131,6 +145,13 @@ impl Display for ResponseLang {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_prompt_states_the_length_allowance() {
+        let prompt = build_summary_prompt("diff --git a/x b/x", ResponseLang::En, 150);
+        assert!(prompt.contains("under about 150 characters"), "{prompt}");
+        assert!(prompt.contains("git diff chunk"), "{prompt}");
+    }
 
     #[test]
     fn test_commit_guidelines_lists_all_commit_types() {

@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod cli;
 pub mod config;
 pub mod endpoint;
@@ -5,6 +6,7 @@ pub mod git;
 pub mod prompt;
 pub mod provider;
 
+use crate::budget::InputBudget;
 use crate::cli::{Cli, Commands, ConfigArgs, ConfigItem, ConfigSubcommand, RunArgs};
 use crate::config::Config;
 use crate::endpoint::resolve_endpoint;
@@ -96,11 +98,12 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     // Only once there is something to send, so that nothing is downloaded in vain.
     prepare_model(client.as_ref(), &model, args.pull).await?;
+    let budget = InputBudget::default();
 
     let diff_len = diff.len();
-    info!(diff_len, "Processing diff");
+    info!(diff_len, ?budget, "Processing diff");
 
-    let prompt = if diff_len > 15000 {
+    let prompt = if diff_len > budget.prompt_bytes {
         warn(&format!(
             "⚠️ Large diff detected ({diff_len} bytes). Switching to 2-Step Generation."
         ));
@@ -111,6 +114,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             chunks,
             lang.clone(),
             think.clone(),
+            budget,
         )
         .await?;
         build_commit_from_summaries_prompt(&summaries, branch.as_deref(), lang.clone())
@@ -423,14 +427,23 @@ fn config(args: ConfigArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-const MAX_CHUNK_BYTES: usize = 12000;
-
-fn truncate_chunk(chunk: String) -> String {
-    if chunk.len() <= MAX_CHUNK_BYTES {
+fn truncate_chunk(chunk: String, max_bytes: usize) -> String {
+    if chunk.len() <= max_bytes {
         return chunk;
     }
-    let end = chunk.floor_char_boundary(MAX_CHUNK_BYTES);
+    let end = chunk.floor_char_boundary(max_bytes);
     format!("{}\n...(truncated due to size)...", &chunk[..end])
+}
+
+/// The most a summary is asked to take, however few chunks there are.
+const SUMMARY_MAX_CHARS: usize = 1500;
+/// The least a summary is asked to take, so that it can still name its change.
+const SUMMARY_MIN_CHARS: usize = 80;
+
+/// How long each of `chunks` summaries may be, so that together they fit one prompt.
+/// Few chunks leave room for detailed summaries; only many chunks make them short.
+fn summary_allowance(budget: InputBudget, chunks: usize) -> usize {
+    (budget.prompt_bytes / chunks.max(1)).clamp(SUMMARY_MIN_CHARS, SUMMARY_MAX_CHARS)
 }
 
 fn split_diff(diff: &str) -> Vec<String> {
@@ -457,20 +470,37 @@ async fn generate_summary_for_chunks(
     chunks: Vec<String>,
     lang: ResponseLang,
     think: Option<crate::provider::ThinkType>,
+    budget: InputBudget,
 ) -> anyhow::Result<String> {
     let mut summaries = Vec::new();
     let total_chunks = chunks.len();
+    let allowance = summary_allowance(budget, total_chunks);
     for (i, chunk) in chunks.into_iter().enumerate() {
-        let chunk_to_send = truncate_chunk(chunk);
+        let chunk_to_send = truncate_chunk(chunk, budget.chunk_bytes);
 
-        let summary_prompt = build_summary_prompt(&chunk_to_send, lang.clone());
+        let summary_prompt = build_summary_prompt(&chunk_to_send, lang.clone(), allowance);
         eprintln!("⏳ Summarizing diff chunk {}/{}...", i + 1, total_chunks);
         let summary = client
             .generate(model, &summary_prompt, think.clone())
             .await?;
         summaries.push(summary);
     }
-    Ok(summaries.join("\n"))
+    let summaries = summaries.join("\n");
+    check_summaries_fit(&summaries, total_chunks, budget)?;
+    Ok(summaries)
+}
+
+/// Fails when the joined summaries are too large for one prompt, before the model
+/// rejects the request. Nothing is cut, so the message never silently misses a change.
+fn check_summaries_fit(summaries: &str, chunks: usize, budget: InputBudget) -> anyhow::Result<()> {
+    if summaries.len() <= budget.prompt_bytes {
+        return Ok(());
+    }
+    bail!(
+        "The summaries of the {chunks} changed files total {} bytes, more than the {} bytes one prompt can take. Commit fewer files at a time (e.g. stage some of them and use --staged).",
+        summaries.len(),
+        budget.prompt_bytes
+    )
 }
 
 fn clean_commit_message(msg: &str) -> String {
@@ -613,10 +643,46 @@ mod tests {
     }
 
     const TRUNCATION_NOTICE: &str = "\n...(truncated due to size)...";
+    /// The limit these tests were written against, the default chunk budget.
+    const MAX_CHUNK_BYTES: usize = 12000;
+
+    #[test]
+    fn summary_allowance_shrinks_only_with_many_chunks() {
+        let budget = InputBudget {
+            prompt_bytes: 15000,
+            chunk_bytes: 12000,
+        };
+        assert_eq!(summary_allowance(budget, 0), SUMMARY_MAX_CHARS);
+        assert_eq!(summary_allowance(budget, 2), SUMMARY_MAX_CHARS);
+        assert_eq!(summary_allowance(budget, 10), 1500);
+        assert_eq!(summary_allowance(budget, 100), 150);
+        assert_eq!(summary_allowance(budget, 1000), SUMMARY_MIN_CHARS);
+    }
+
+    #[test]
+    fn summaries_over_the_prompt_budget_fail_with_a_hint() {
+        let budget = InputBudget {
+            prompt_bytes: 10,
+            chunk_bytes: 10,
+        };
+        assert!(check_summaries_fit("0123456789", 2, budget).is_ok());
+        let error = check_summaries_fit("0123456789a", 2, budget)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("2 changed files"), "{error}");
+        assert!(error.contains("11 bytes"), "{error}");
+        assert!(error.contains("10 bytes"), "{error}");
+        assert!(error.contains("--staged"), "{error}");
+    }
+
+    #[test]
+    fn default_chunk_budget_matches_the_truncation_tests() {
+        assert_eq!(InputBudget::default().chunk_bytes, MAX_CHUNK_BYTES);
+    }
 
     fn assert_truncated_to(input: String, expected_len: usize) {
         let expected_body = input[..expected_len].to_string();
-        let result = truncate_chunk(input);
+        let result = truncate_chunk(input, MAX_CHUNK_BYTES);
         let body = result
             .strip_suffix(TRUNCATION_NOTICE)
             .expect("truncated chunk should end with the notice");
@@ -654,7 +720,7 @@ mod tests {
     #[test]
     fn test_truncate_chunk_at_limit_is_unchanged() {
         let input = "a".repeat(12000);
-        assert_eq!(truncate_chunk(input.clone()), input);
+        assert_eq!(truncate_chunk(input.clone(), MAX_CHUNK_BYTES), input);
     }
 
     #[test]

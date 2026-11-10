@@ -1277,6 +1277,37 @@ fn large_diff_is_split_per_file_despite_color_config() {
     }
 }
 
+/// Many files make each summary short, in proportion to how many there are.
+/// Summaries that still overflow the prompt stop the run before the final request.
+#[test]
+fn summaries_too_large_for_one_prompt_stop_before_the_final_request() {
+    let repo = TestRepo::with_commit();
+    let content = format!("{}\n", "y".repeat(80)).repeat(10);
+    for i in 0..20 {
+        repo.write(&format!("file_{i}.txt"), &content);
+    }
+    repo.ollama.respond_with(&"- a long summary\n".repeat(60));
+
+    let output = repo.kommit(&["--yes"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr.contains("The summaries of the 20 changed files total"),
+        "stderr was {stderr}"
+    );
+    assert!(stderr.contains("--staged"), "stderr was {stderr}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let prompts = repo.ollama.prompts();
+    assert_eq!(prompts.len(), 20, "only summaries were requested");
+    for prompt in &prompts {
+        assert!(
+            prompt.contains("under about 750 characters"),
+            "prompt was {prompt}"
+        );
+    }
+}
+
 /// With stdout captured, the tokens are previewed on stderr as they arrive, and stdout
 /// receives only the finished message.
 #[test]
