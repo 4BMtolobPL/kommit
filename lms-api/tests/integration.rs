@@ -37,11 +37,11 @@ async fn test_error_handling() {
     let result = client.models().await;
 
     assert!(result.is_err());
-    if let Err(lms_api::error::ApiError::Status(status, body)) = result {
+    if let Err(lms_api::Error::Server { status, body }) = result {
         assert_eq!(status, 500);
         assert_eq!(body, "Internal Server Error");
     } else {
-        panic!("Expected Status error");
+        panic!("Expected Server error");
     }
 }
 

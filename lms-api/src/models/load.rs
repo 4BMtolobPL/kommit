@@ -1,12 +1,12 @@
 use crate::LmStudio;
-use crate::error::ApiError;
+use crate::Result;
 use crate::models::load::request::LoadRequest;
 use crate::models::load::response::LoadResponse;
 use tracing::{info, instrument};
 
 impl LmStudio {
     #[instrument(skip(self, request), fields(url = %self.url, endpoint = "/api/v1/models/load", model = %request.model))]
-    pub async fn load(&self, request: LoadRequest) -> Result<LoadResponse, ApiError> {
+    pub async fn load(&self, request: LoadRequest) -> Result<LoadResponse> {
         info!("Load an LLM or Embedding model into memory with custom configuration for inference");
 
         let url = self.endpoint("api/v1/models/load")?;

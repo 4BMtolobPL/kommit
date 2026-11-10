@@ -3,7 +3,8 @@ pub mod error;
 pub mod models;
 pub mod types;
 
-use crate::error::ApiError;
+pub use error::{Error, Result};
+
 use reqwest::{Client, IntoUrl, Response, Url};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -14,13 +15,11 @@ pub struct LmStudio {
 }
 
 impl LmStudio {
-    pub fn new(host: impl IntoUrl, port: u16) -> Result<Self, ApiError> {
-        let mut url = host
-            .into_url()
-            .map_err(|e| ApiError::Config(e.to_string()))?;
+    pub fn new(host: impl IntoUrl, port: u16) -> Result<Self> {
+        let mut url = host.into_url().map_err(|e| Error::Config(e.to_string()))?;
 
         url.set_port(Some(port))
-            .map_err(|_| ApiError::Config("Could not set port".to_string()))?;
+            .map_err(|_| Error::Config("Could not set port".to_string()))?;
 
         Ok(Self::from_url(url))
     }
@@ -44,18 +43,18 @@ impl LmStudio {
         self
     }
 
-    async fn handle_response<T: DeserializeOwned>(&self, res: Response) -> Result<T, ApiError> {
+    async fn handle_response<T: DeserializeOwned>(&self, res: Response) -> Result<T> {
         let status = res.status();
         if !status.is_success() {
             let body = res.text().await.unwrap_or_default();
-            return Err(ApiError::Status(status, body));
+            return Err(Error::Server { status, body });
         }
 
         Ok(res.json::<T>().await?)
     }
 
-    fn endpoint(&self, path: &str) -> Result<Url, ApiError> {
-        self.url.join(path).map_err(ApiError::Url)
+    fn endpoint(&self, path: &str) -> Result<Url> {
+        self.url.join(path).map_err(Error::Url)
     }
 }
 

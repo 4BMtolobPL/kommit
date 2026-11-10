@@ -2,14 +2,14 @@
 pub mod stream;
 
 use crate::LmStudio;
+use crate::Result;
 use crate::chat::request::ChatRequest;
 use crate::chat::response::ChatResponse;
-use crate::error::ApiError;
 use tracing::{info, instrument};
 
 impl LmStudio {
     #[instrument(skip(self, request), fields(url = %self.url, endpoint = "/api/v1/chat", model = request.model))]
-    pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ApiError> {
+    pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         info!("Send a message to a model and receive a response. Supports MCP integration.");
 
         let url = self.endpoint("api/v1/chat")?;
