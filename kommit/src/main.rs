@@ -21,7 +21,7 @@ use crate::prompt::{
     build_summary_prompt,
 };
 use crate::provider::{
-    LlmProvider, ProviderStrategy, StreamResponse, create_client, missing_model_error,
+    LlmProvider, ProviderStrategy, StreamResponse, ThinkType, create_client, missing_model_error,
 };
 use anyhow::{Context, anyhow, bail};
 use clap::Parser;
@@ -31,6 +31,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use tempfile::NamedTempFile;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
+use url::Url;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -44,6 +45,56 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// The options of a run, each from the command line, else the config file, else
+/// its default.
+#[derive(Debug)]
+struct RunOptions {
+    provider: LlmProvider,
+    model: String,
+    lang: ResponseLang,
+    stream: bool,
+    think: Option<ThinkType>,
+    context_length: Option<u32>,
+    url: Url,
+    port: u16,
+}
+
+const DEFAULT_MODEL: &str = "gemma4";
+
+fn resolve_options(args: &RunArgs, config: &Config) -> anyhow::Result<RunOptions> {
+    let provider = args
+        .provider
+        .clone()
+        .or_else(|| config.provider.clone())
+        .unwrap_or(LlmProvider::Ollama);
+    let (url, port) = resolve_endpoint(
+        &provider,
+        args.host.as_deref(),
+        args.port,
+        config.host.as_deref(),
+        config.port,
+    )?;
+
+    Ok(RunOptions {
+        model: args
+            .model
+            .clone()
+            .or_else(|| config.model.clone())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+        lang: args
+            .lang
+            .clone()
+            .or_else(|| config.lang.clone())
+            .unwrap_or(ResponseLang::En),
+        stream: args.stream.or(config.stream).unwrap_or(false),
+        think: args.think.clone().or_else(|| config.think.clone()),
+        context_length: args.context_length.or(config.context_length),
+        provider,
+        url,
+        port,
+    })
 }
 
 /// Logs go to stderr, so that stdout carries only the commit message.
@@ -62,29 +113,16 @@ fn init_tracing() {
 async fn run(args: RunArgs) -> anyhow::Result<()> {
     let config = Config::load()?;
     info!(?args, ?config, "Running with merged config");
-
-    let provider = args
-        .provider
-        .or(config.provider.clone())
-        .unwrap_or(LlmProvider::Ollama);
-    let model = args
-        .model
-        .or(config.model.clone())
-        .unwrap_or_else(|| "gemma4".to_string());
-    let lang = args
-        .lang
-        .or(config.lang.clone())
-        .unwrap_or(ResponseLang::En);
-    let stream_enabled = args.stream.or(config.stream).unwrap_or(false);
-    let think = args.think.or(config.think.clone());
-    let context_length = args.context_length.or(config.context_length);
-    let (url, port) = resolve_endpoint(
-        &provider,
-        args.host.as_deref(),
-        args.port,
-        config.host.as_deref(),
-        config.port,
-    )?;
+    let RunOptions {
+        provider,
+        model,
+        lang,
+        stream: stream_enabled,
+        think,
+        context_length,
+        url,
+        port,
+    } = resolve_options(&args, &config)?;
 
     let client = create_client(provider, url, port)?;
 
@@ -473,7 +511,7 @@ async fn generate_summary_for_chunks(
     chunks: Vec<String>,
     files: usize,
     lang: ResponseLang,
-    think: Option<crate::provider::ThinkType>,
+    think: Option<ThinkType>,
     budget: InputBudget,
 ) -> anyhow::Result<String> {
     let mut summaries = Vec::new();
@@ -566,6 +604,121 @@ fn validate_commit_message(msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::ValueEnum;
+
+    fn resolve(cli: &[&str], config: &Config) -> RunOptions {
+        let argv = ["kommit", "run"].iter().chain(cli).copied();
+        let Commands::Run(args) = Cli::try_parse_from(argv).unwrap().command else {
+            unreachable!("parsed the run subcommand");
+        };
+        resolve_options(&args, config).unwrap()
+    }
+
+    fn name(value: &impl ValueEnum) -> String {
+        value.to_possible_value().unwrap().get_name().to_owned()
+    }
+
+    fn full_config() -> Config {
+        Config {
+            model: Some("config-model".to_owned()),
+            lang: Some(ResponseLang::Ko),
+            provider: Some(LlmProvider::LmStudio),
+            stream: Some(true),
+            think: Some(ThinkType::Low),
+            host: Some("http://config-host".to_owned()),
+            port: Some(1111),
+            context_length: Some(2048),
+            exclude_patterns: None,
+        }
+    }
+
+    #[test]
+    fn defaults_apply_without_options_or_config() {
+        let options = resolve(&[], &Config::default());
+        assert_eq!(name(&options.provider), "ollama");
+        assert_eq!(options.model, DEFAULT_MODEL);
+        assert_eq!(name(&options.lang), "en");
+        assert!(!options.stream);
+        assert!(options.think.is_none());
+        assert!(options.context_length.is_none());
+        assert_eq!(options.url.as_str(), "http://localhost/");
+        assert_eq!(options.port, LlmProvider::Ollama.default_port());
+    }
+
+    #[test]
+    fn config_values_apply_without_options() {
+        let options = resolve(&[], &full_config());
+        assert_eq!(name(&options.provider), "lm-studio");
+        assert_eq!(options.model, "config-model");
+        assert_eq!(name(&options.lang), "ko");
+        assert!(options.stream);
+        assert_eq!(options.think.as_ref().map(name).as_deref(), Some("low"));
+        assert_eq!(options.context_length, Some(2048));
+        assert_eq!(options.url.as_str(), "http://config-host/");
+        assert_eq!(options.port, 1111);
+    }
+
+    #[test]
+    fn options_beat_the_config() {
+        let options = resolve(
+            &[
+                "--provider",
+                "ollama",
+                "--model",
+                "cli-model",
+                "--lang",
+                "en",
+                "--stream",
+                "false",
+                "--think",
+                "high",
+                "--context-length",
+                "4096",
+                "--host",
+                "http://cli-host",
+                "--port",
+                "2222",
+            ],
+            &full_config(),
+        );
+        assert_eq!(name(&options.provider), "ollama");
+        assert_eq!(options.model, "cli-model");
+        assert_eq!(name(&options.lang), "en");
+        assert!(!options.stream);
+        assert_eq!(options.think.as_ref().map(name).as_deref(), Some("high"));
+        assert_eq!(options.context_length, Some(4096));
+        assert_eq!(options.url.as_str(), "http://cli-host/");
+        assert_eq!(options.port, 2222);
+    }
+
+    #[test]
+    fn each_option_replaces_only_its_own_config_value() {
+        let options = resolve(&["--model", "cli-model"], &full_config());
+        assert_eq!(options.model, "cli-model");
+        assert_eq!(name(&options.provider), "lm-studio");
+        assert_eq!(name(&options.lang), "ko");
+        assert!(options.stream);
+        assert_eq!(options.context_length, Some(2048));
+    }
+
+    #[test]
+    fn the_cli_provider_picks_the_default_port() {
+        let config = Config {
+            provider: Some(LlmProvider::Ollama),
+            ..Config::default()
+        };
+        let options = resolve(&["--provider", "lm-studio"], &config);
+        assert_eq!(options.port, LlmProvider::LmStudio.default_port());
+    }
+
+    #[test]
+    fn conflicting_ports_are_an_error() {
+        let argv = ["kommit", "run", "--host", "http://h:1", "--port", "2"];
+        let Commands::Run(args) = Cli::try_parse_from(argv).unwrap().command else {
+            unreachable!("parsed the run subcommand");
+        };
+        assert!(resolve_options(&args, &Config::default()).is_err());
+    }
 
     fn confirm(input: &[u8], is_terminal: bool) -> anyhow::Result<()> {
         let files = [".env".to_owned()];
