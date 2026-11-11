@@ -1,4 +1,5 @@
 pub mod budget;
+pub mod chunk;
 pub mod cli;
 pub mod config;
 pub mod endpoint;
@@ -7,6 +8,7 @@ pub mod prompt;
 pub mod provider;
 
 use crate::budget::InputBudget;
+use crate::chunk::{chunk_files, split_diff, truncate_chunk};
 use crate::cli::{Cli, Commands, ConfigArgs, ConfigItem, ConfigSubcommand, RunArgs};
 use crate::config::Config;
 use crate::endpoint::resolve_endpoint;
@@ -109,11 +111,19 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             "⚠️ Large diff detected ({diff_len} bytes, over {} for one prompt). Switching to 2-Step Generation.",
             budget.prompt_bytes
         ));
-        let chunks = split_diff(&diff);
+        let files = split_diff(&diff);
+        let file_count = files.len();
+        let chunks = chunk_files(files, budget.chunk_bytes);
+        info!(
+            files = file_count,
+            chunks = chunks.len(),
+            "Chunked the diff"
+        );
         let summaries = generate_summary_for_chunks(
             client.as_ref(),
             &model,
             chunks,
+            file_count,
             lang.clone(),
             think.clone(),
             budget,
@@ -446,14 +456,6 @@ fn config(args: ConfigArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn truncate_chunk(chunk: String, max_bytes: usize) -> String {
-    if chunk.len() <= max_bytes {
-        return chunk;
-    }
-    let end = chunk.floor_char_boundary(max_bytes);
-    format!("{}\n...(truncated due to size)...", &chunk[..end])
-}
-
 /// The most a summary is asked to take, however few chunks there are.
 const SUMMARY_MAX_CHARS: usize = 1500;
 /// The least a summary is asked to take, so that it can still name its change.
@@ -465,28 +467,11 @@ fn summary_allowance(budget: InputBudget, chunks: usize) -> usize {
     (budget.prompt_bytes / chunks.max(1)).clamp(SUMMARY_MIN_CHARS, SUMMARY_MAX_CHARS)
 }
 
-fn split_diff(diff: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current_chunk = String::new();
-
-    for line in diff.lines() {
-        if line.starts_with("diff --git ") && !current_chunk.is_empty() {
-            chunks.push(current_chunk);
-            current_chunk = String::new();
-        }
-        current_chunk.push_str(line);
-        current_chunk.push('\n');
-    }
-    if !current_chunk.is_empty() {
-        chunks.push(current_chunk);
-    }
-    chunks
-}
-
 async fn generate_summary_for_chunks(
     client: &dyn crate::provider::ProviderStrategy,
     model: &str,
     chunks: Vec<String>,
+    files: usize,
     lang: ResponseLang,
     think: Option<crate::provider::ThinkType>,
     budget: InputBudget,
@@ -505,18 +490,18 @@ async fn generate_summary_for_chunks(
         summaries.push(summary);
     }
     let summaries = summaries.join("\n");
-    check_summaries_fit(&summaries, total_chunks, budget)?;
+    check_summaries_fit(&summaries, files, budget)?;
     Ok(summaries)
 }
 
 /// Fails when the joined summaries are too large for one prompt, before the model
 /// rejects the request. Nothing is cut, so the message never silently misses a change.
-fn check_summaries_fit(summaries: &str, chunks: usize, budget: InputBudget) -> anyhow::Result<()> {
+fn check_summaries_fit(summaries: &str, files: usize, budget: InputBudget) -> anyhow::Result<()> {
     if summaries.len() <= budget.prompt_bytes {
         return Ok(());
     }
     bail!(
-        "The summaries of the {chunks} changed files total {} bytes, more than the {} bytes one prompt can take. Commit fewer files at a time (e.g. stage some of them and use --staged).",
+        "The summaries of the {files} changed files total {} bytes, more than the {} bytes one prompt can take. Commit fewer files at a time (e.g. stage some of them and use --staged).",
         summaries.len(),
         budget.prompt_bytes
     )
@@ -638,34 +623,6 @@ mod tests {
     }
 
     #[test]
-    fn test_split_diff_empty() {
-        let diff = "";
-        let chunks = split_diff(diff);
-        assert!(chunks.is_empty());
-    }
-
-    #[test]
-    fn test_split_diff_single() {
-        let diff = "diff --git a/src/main.rs b/src/main.rs\nindex 123456..789abc 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,2 +1,2 @@\n-fn main() {}\n+fn main() { println!(\"hello\"); }";
-        let chunks = split_diff(diff);
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].contains("diff --git a/src/main.rs"));
-    }
-
-    #[test]
-    fn test_split_diff_multiple() {
-        let diff = "diff --git a/file1.rs b/file1.rs\n+ fn first() {}\ndiff --git a/file2.rs b/file2.rs\n+ fn second() {}";
-        let chunks = split_diff(diff);
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks[0].contains("first"));
-        assert!(chunks[1].contains("second"));
-    }
-
-    const TRUNCATION_NOTICE: &str = "\n...(truncated due to size)...";
-    /// The limit these tests were written against, the default chunk budget.
-    const MAX_CHUNK_BYTES: usize = 12000;
-
-    #[test]
     fn summary_allowance_shrinks_only_with_many_chunks() {
         let budget = InputBudget {
             prompt_bytes: 15000,
@@ -692,54 +649,6 @@ mod tests {
         assert!(error.contains("11 bytes"), "{error}");
         assert!(error.contains("10 bytes"), "{error}");
         assert!(error.contains("--staged"), "{error}");
-    }
-
-    #[test]
-    fn default_chunk_budget_matches_the_truncation_tests() {
-        assert_eq!(InputBudget::default().chunk_bytes, MAX_CHUNK_BYTES);
-    }
-
-    fn assert_truncated_to(input: String, expected_len: usize) {
-        let expected_body = input[..expected_len].to_string();
-        let result = truncate_chunk(input, MAX_CHUNK_BYTES);
-        let body = result
-            .strip_suffix(TRUNCATION_NOTICE)
-            .expect("truncated chunk should end with the notice");
-        assert_eq!(body.len(), expected_len);
-        assert_eq!(body, expected_body);
-    }
-
-    // 12,000 is a multiple of 3, so this limit lands on a boundary of '가'.
-    #[test]
-    fn test_truncate_chunk_multibyte_on_boundary() {
-        assert_truncated_to("가".repeat(5000), 12000);
-    }
-
-    // Reproduces issue #38: byte 12,000 is inside '가' (bytes 11998..12001).
-    #[test]
-    fn test_truncate_chunk_multibyte_one_byte_offset() {
-        assert_truncated_to(format!("a{}", "가".repeat(5000)), 11998);
-    }
-
-    #[test]
-    fn test_truncate_chunk_multibyte_two_byte_offset() {
-        assert_truncated_to(format!("aa{}", "가".repeat(5000)), 11999);
-    }
-
-    #[test]
-    fn test_truncate_chunk_four_byte_char() {
-        assert_truncated_to(format!("a{}", "😀".repeat(3000)), 11997);
-    }
-
-    #[test]
-    fn test_truncate_chunk_ascii_over_limit() {
-        assert_truncated_to("a".repeat(12001), 12000);
-    }
-
-    #[test]
-    fn test_truncate_chunk_at_limit_is_unchanged() {
-        let input = "a".repeat(12000);
-        assert_eq!(truncate_chunk(input.clone(), MAX_CHUNK_BYTES), input);
     }
 
     #[test]
