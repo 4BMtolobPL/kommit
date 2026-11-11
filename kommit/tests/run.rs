@@ -33,6 +33,10 @@ struct FakeOllama {
     gate: StreamGate,
     /// What a non-streamed response returns.
     response: Arc<Mutex<String>>,
+    /// How many times a model was loaded with an empty prompt.
+    load_requests: Arc<Mutex<usize>>,
+    /// The context length `/api/ps` reports for a loaded model, or none like older servers.
+    context_length: Arc<Mutex<Option<u32>>>,
 }
 
 impl FakeOllama {
@@ -40,26 +44,26 @@ impl FakeOllama {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let prompts = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&prompts);
         let show_requests = Arc::new(Mutex::new(0));
-        let server_show_requests = Arc::clone(&show_requests);
         let pull_requests = Arc::new(Mutex::new(0));
-        let server_pull_requests = Arc::clone(&pull_requests);
         let gate = StreamGate::default();
-        let server_gate = Arc::clone(&gate);
         let response = Arc::new(Mutex::new(COMMIT_MESSAGE.to_owned()));
         let server_response = Arc::clone(&response);
+        let load_requests = Arc::new(Mutex::new(0));
+        let context_length = Arc::new(Mutex::new(None));
+        let server = OllamaState {
+            prompts: Arc::clone(&prompts),
+            show_requests: Arc::clone(&show_requests),
+            pull_requests: Arc::clone(&pull_requests),
+            gate: Arc::clone(&gate),
+            load_requests: Arc::clone(&load_requests),
+            loaded: Arc::default(),
+            context_length: Arc::clone(&context_length),
+        };
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let response = server_response.lock().unwrap().clone();
-                respond_ollama(
-                    stream.unwrap(),
-                    &recorded,
-                    &server_show_requests,
-                    &server_pull_requests,
-                    &server_gate,
-                    &response,
-                );
+                respond_ollama(stream.unwrap(), &server, &response);
             }
         });
         Self {
@@ -69,7 +73,18 @@ impl FakeOllama {
             pull_requests,
             gate,
             response,
+            load_requests,
+            context_length,
         }
+    }
+
+    /// Makes `/api/ps` report that loaded models run with a context of `tokens` tokens.
+    fn report_context_length(&self, tokens: u32) {
+        *self.context_length.lock().unwrap() = Some(tokens);
+    }
+
+    fn load_requests(&self) -> usize {
+        *self.load_requests.lock().unwrap()
     }
 
     /// Makes every later non-streamed response return `response`.
@@ -143,25 +158,49 @@ fn write_json(stream: &mut TcpStream, status: &str, body: &Value) {
     .unwrap();
 }
 
-fn respond_ollama(
-    mut stream: TcpStream,
-    prompts: &Mutex<Vec<String>>,
-    show_requests: &Mutex<usize>,
-    pull_requests: &Mutex<usize>,
-    gate: &StreamGate,
-    response: &str,
-) {
+/// What the fake Ollama server records and serves, shared with its `FakeOllama`.
+struct OllamaState {
+    prompts: Arc<Mutex<Vec<String>>>,
+    show_requests: Arc<Mutex<usize>>,
+    pull_requests: Arc<Mutex<usize>>,
+    gate: StreamGate,
+    load_requests: Arc<Mutex<usize>>,
+    /// The models loaded so far, as `/api/ps` names them.
+    loaded: Arc<Mutex<Vec<String>>>,
+    context_length: Arc<Mutex<Option<u32>>>,
+}
+
+fn respond_ollama(mut stream: TcpStream, state: &OllamaState, response: &str) {
     let (request_line, request) = read_request(&stream);
     if request_line == "POST /api/pull" {
         assert_eq!(request["name"], MISSING_MODEL);
         respond_ollama_pull(stream);
-        *pull_requests.lock().unwrap() += 1;
+        *state.pull_requests.lock().unwrap() += 1;
+        return;
+    }
+    if request_line == "GET /api/ps" {
+        let context_length = *state.context_length.lock().unwrap();
+        let models: Vec<Value> = state
+            .loaded
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|name| match context_length {
+                Some(tokens) => serde_json::json!({ "name": name, "context_length": tokens }),
+                None => serde_json::json!({ "name": name }),
+            })
+            .collect();
+        write_json(
+            &mut stream,
+            "200 OK",
+            &serde_json::json!({ "models": models }),
+        );
         return;
     }
     if request_line == "POST /api/show" {
-        *show_requests.lock().unwrap() += 1;
+        *state.show_requests.lock().unwrap() += 1;
         let model = request["name"].as_str().unwrap();
-        if model == MISSING_MODEL && *pull_requests.lock().unwrap() == 0 {
+        if model == MISSING_MODEL && *state.pull_requests.lock().unwrap() == 0 {
             let error = serde_json::json!({ "error": format!("model '{model}' not found") });
             write_json(&mut stream, "404 Not Found", &error);
         } else {
@@ -171,13 +210,31 @@ fn respond_ollama(
     }
     assert_eq!(request_line, "POST /api/generate");
 
-    prompts
-        .lock()
-        .unwrap()
-        .push(request["prompt"].as_str().unwrap().to_owned());
+    let prompt = request["prompt"].as_str().unwrap();
+    if prompt.is_empty() {
+        // An empty prompt only loads the model, which `/api/ps` then names with its tag.
+        *state.load_requests.lock().unwrap() += 1;
+        let model = request["model"].as_str().unwrap();
+        let name = if model.contains(':') {
+            model.to_owned()
+        } else {
+            format!("{model}:latest")
+        };
+        state.loaded.lock().unwrap().push(name);
+        let loaded = serde_json::json!({
+            "model": model,
+            "created_at": "2026-01-01T00:00:00Z",
+            "response": "",
+            "done": true,
+            "done_reason": "load",
+        });
+        write_json(&mut stream, "200 OK", &loaded);
+        return;
+    }
+    state.prompts.lock().unwrap().push(prompt.to_owned());
 
     if request["stream"] == true {
-        respond_ollama_streaming(stream, gate);
+        respond_ollama_streaming(stream, &state.gate);
         return;
     }
 
@@ -1729,13 +1786,40 @@ fn ollama_uses_the_default_budget_without_a_context_length() {
     let output = repo.kommit(&[]);
 
     assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.ollama.load_requests(), 1);
     assert_eq!(summary_prompts(&repo.ollama.prompts()), 0);
+}
+
+#[test]
+fn ollama_context_length_sizes_the_prompt() {
+    for (context_length, summaries) in [(4096, 1), (32768, 0)] {
+        let repo = TestRepo::with_commit();
+        repo.make_medium_diff();
+        repo.ollama.report_context_length(context_length);
+
+        let output = repo.kommit(&[]);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{context_length}: {output:?}");
+        assert_eq!(
+            stderr.contains("Large diff detected"),
+            summaries > 0,
+            "{context_length}: {stderr}"
+        );
+        assert_eq!(repo.ollama.load_requests(), 1, "{context_length}");
+        assert_eq!(
+            summary_prompts(&repo.ollama.prompts()),
+            summaries,
+            "{context_length}"
+        );
+    }
 }
 
 #[test]
 fn context_length_option_sizes_the_prompt_for_ollama() {
     let repo = TestRepo::with_commit();
     repo.make_medium_diff();
+    repo.ollama.report_context_length(32768);
 
     let output = repo.kommit(&["--context-length", "4096"]);
 
@@ -1745,6 +1829,8 @@ fn context_length_option_sizes_the_prompt_for_ollama() {
         stderr.contains("Large diff detected"),
         "stderr was {stderr}"
     );
+    // A configured length is used as is, so the model is not loaded to read one.
+    assert_eq!(repo.ollama.load_requests(), 0);
     assert_eq!(summary_prompts(&repo.ollama.prompts()), 1);
 }
 
