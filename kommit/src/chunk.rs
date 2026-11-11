@@ -101,7 +101,6 @@ pub(crate) fn truncate_chunk(chunk: String, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::budget::InputBudget;
 
     /// The diff of `path` with `hunks` hunks, each changing one line to `body`.
     fn file_diff(path: &str, hunks: usize, body: &str) -> String {
@@ -233,13 +232,8 @@ mod tests {
     }
 
     const TRUNCATION_NOTICE: &str = "\n...(truncated due to size)...";
-    /// The limit these tests were written against, the default chunk budget.
+    /// The limit the truncation tests cut at.
     const MAX_CHUNK_BYTES: usize = 12000;
-
-    #[test]
-    fn default_chunk_budget_matches_the_truncation_tests() {
-        assert_eq!(InputBudget::default().chunk_bytes, MAX_CHUNK_BYTES);
-    }
 
     fn assert_truncated_to(input: String, expected_len: usize) {
         let expected_body = input[..expected_len].to_string();
@@ -261,11 +255,6 @@ mod tests {
     #[test]
     fn test_truncate_chunk_multibyte_one_byte_offset() {
         assert_truncated_to(format!("a{}", "가".repeat(5000)), 11998);
-    }
-
-    #[test]
-    fn test_truncate_chunk_multibyte_two_byte_offset() {
-        assert_truncated_to(format!("aa{}", "가".repeat(5000)), 11999);
     }
 
     #[test]

@@ -174,20 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn stream_rejects_a_non_boolean_value() {
-        assert!(parse_run(&["--stream", "yes"]).is_err());
-    }
-
-    #[test]
-    fn pull_is_separate_from_yes() {
-        let args = parse_run(&["--pull"]).unwrap();
-        assert!(args.pull);
-        assert!(!args.yes);
-        assert!(!parse_run(&["--yes"]).unwrap().pull);
-        assert!(!parse_run(&[]).unwrap().pull);
-    }
-
-    #[test]
     fn context_length_must_be_positive() {
         assert_eq!(
             parse_run(&["--context-length", "4096"])

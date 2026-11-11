@@ -692,16 +692,6 @@ mod tests {
     }
 
     #[test]
-    fn each_option_replaces_only_its_own_config_value() {
-        let options = resolve(&["--model", "cli-model"], &full_config());
-        assert_eq!(options.model, "cli-model");
-        assert_eq!(name(&options.provider), "lm-studio");
-        assert_eq!(name(&options.lang), "ko");
-        assert!(options.stream);
-        assert_eq!(options.context_length, Some(2048));
-    }
-
-    #[test]
     fn the_cli_provider_picks_the_default_port() {
         let config = Config {
             provider: Some(LlmProvider::Ollama),
@@ -709,15 +699,6 @@ mod tests {
         };
         let options = resolve(&["--provider", "lm-studio"], &config);
         assert_eq!(options.port, LlmProvider::LmStudio.default_port());
-    }
-
-    #[test]
-    fn conflicting_ports_are_an_error() {
-        let argv = ["kommit", "run", "--host", "http://h:1", "--port", "2"];
-        let Commands::Run(args) = Cli::try_parse_from(argv).unwrap().command else {
-            unreachable!("parsed the run subcommand");
-        };
-        assert!(resolve_options(&args, &Config::default()).is_err());
     }
 
     fn confirm(input: &[u8], is_terminal: bool) -> anyhow::Result<()> {

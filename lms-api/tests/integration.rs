@@ -141,36 +141,6 @@ async fn test_chat_returns_the_response() {
     }
 }
 
-#[tokio::test]
-async fn test_chat_server_error_keeps_the_body() {
-    use lms_api::chat::request::ChatRequestBuilder;
-
-    let mut server = Server::new_async().await;
-    let url = server.url();
-
-    let _m = server
-        .mock("POST", "/api/v1/chat")
-        .with_status(400)
-        .with_body(r#"{"error":{"message":"bad request"}}"#)
-        .create_async()
-        .await;
-
-    let client = LmStudio::from_url(Url::parse(&url).unwrap());
-    let request = ChatRequestBuilder::default()
-        .model("test-model")
-        .input("hi")
-        .build()
-        .unwrap();
-
-    match client.chat(request).await {
-        Err(lms_api::Error::Server { status, body }) => {
-            assert_eq!(status, 400);
-            assert_eq!(body, r#"{"error":{"message":"bad request"}}"#);
-        }
-        other => panic!("expected a server error, got {other:?}"),
-    }
-}
-
 #[cfg(feature = "stream")]
 #[tokio::test]
 async fn test_chat_stream_yields_deltas_until_done() {

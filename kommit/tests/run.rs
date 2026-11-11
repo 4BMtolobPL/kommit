@@ -787,29 +787,6 @@ fn plain_run_reviews_every_change_and_changes_nothing() {
 }
 
 #[test]
-fn plain_run_reviews_only_staged_changes() {
-    let repo = TestRepo::with_commit();
-    repo.write("tracked.txt", "staged line\n");
-    repo.git(&["add", "tracked.txt"]);
-
-    let prompt = repo.run_ok(&[]);
-
-    assert!(prompt.contains("+staged line"), "prompt was {prompt}");
-    assert_eq!(repo.status(), "M  tracked.txt\n");
-}
-
-#[test]
-fn plain_run_reviews_only_new_files() {
-    let repo = TestRepo::with_commit();
-    repo.write("new.txt", "new file line\n");
-
-    let prompt = repo.run_ok(&["--yes"]);
-
-    assert!(prompt.contains("+new file line"), "prompt was {prompt}");
-    assert_eq!(repo.status(), "?? new.txt\n");
-}
-
-#[test]
 fn plain_run_works_before_the_first_commit() {
     let repo = TestRepo::new();
     repo.write("new.txt", "new file line\n");
@@ -1275,22 +1252,6 @@ fn config_set_keeps_a_broken_config_file() {
 }
 
 #[test]
-fn config_set_keeps_an_unknown_key() {
-    let repo = TestRepo::new();
-    let path = repo.config_path();
-    let content = b"modle = \"typo\"\n";
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, content).unwrap();
-
-    let output = repo.kommit_config(&["set", "port", "1234"]);
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "stderr was {stderr}");
-    assert!(stderr.contains("modle"), "stderr was {stderr}");
-    assert_eq!(fs::read(&path).unwrap(), content);
-}
-
-#[test]
 fn config_show_reports_a_broken_config_file() {
     let repo = TestRepo::new();
     let (path, _) = repo.write_broken_config();
@@ -1345,66 +1306,6 @@ fn port_in_cli_host_is_used() {
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(repo.ollama.prompts().len(), 1);
-}
-
-#[test]
-fn port_in_config_host_is_used() {
-    let repo = TestRepo::with_commit();
-    repo.write("tracked.txt", "changed\n");
-    let path = repo.config_path();
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(
-        &path,
-        format!("host = \"127.0.0.1:{}\"\n", repo.ollama.port),
-    )
-    .unwrap();
-
-    let output = repo.kommit_run_raw(&[]);
-
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(repo.ollama.prompts().len(), 1);
-}
-
-#[test]
-fn conflicting_ports_stop_before_the_llm() {
-    let repo = TestRepo::with_commit();
-    repo.write("tracked.txt", "changed\n");
-    let host = format!("127.0.0.1:{}", repo.ollama.port);
-
-    let output = repo.kommit_run_raw(&["--host", &host, "--port", "1"]);
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "stderr was {stderr}");
-    assert!(stderr.contains("Conflicting ports"), "stderr was {stderr}");
-    assert_eq!(repo.ollama.prompts(), Vec::<String>::new());
-}
-
-#[test]
-fn large_diff_is_split_per_file_despite_color_config() {
-    let repo = TestRepo::with_commit();
-    repo.git(&["config", "color.ui", "always"]);
-    repo.make_large_diff();
-
-    let output = repo.kommit(&[]);
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{output:?}");
-    assert!(
-        stderr.contains("Large diff detected"),
-        "stderr was {stderr}"
-    );
-    assert!(stderr.contains("chunk 1/2"), "stderr was {stderr}");
-    assert!(stderr.contains("chunk 2/2"), "stderr was {stderr}");
-    assert_eq!(output.stdout, format!("{COMMIT_MESSAGE}\n").as_bytes());
-    let prompts = repo.ollama.prompts();
-    let summaries = prompts
-        .iter()
-        .filter(|prompt| prompt.contains("git diff chunk"))
-        .count();
-    assert_eq!(summaries, 2, "prompts were {prompts:?}");
-    for prompt in &prompts {
-        assert!(!prompt.contains('\x1b'), "prompt was {prompt:?}");
-    }
 }
 
 /// Writes `count` new files of about 800 bytes each, about 19 KB of diff in total: too

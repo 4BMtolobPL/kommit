@@ -156,46 +156,18 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn a_line_split_across_chunks_is_decoded_once_whole() {
-        let body = delta("hello");
-        let (first, second) = body.split_at(20);
-
-        let mut decoder = SseDecoder::default();
-        assert!(decoder.feed(first.as_bytes()).is_empty());
-        assert_eq!(contents(decoder.feed(second.as_bytes())), ["hello"]);
-    }
-
+    /// Covers splits inside a line, between events, and inside a multi-byte character.
     #[test]
     fn every_split_point_gives_the_same_events() {
-        let body = format!("{}{}", delta("one"), delta("two"));
+        let body = format!("{}{}", delta("one"), delta("한글"));
         for at in 0..=body.len() {
             let (first, second) = body.as_bytes().split_at(at);
             assert_eq!(
                 contents(decode(&[first, second])),
-                ["one", "two"],
+                ["one", "한글"],
                 "split at {at}"
             );
         }
-    }
-
-    #[test]
-    fn a_multibyte_character_split_across_chunks_is_kept() {
-        let body = delta("한글 커밋");
-        let bytes = body.as_bytes();
-        // Split inside the three-byte encoding of '한'.
-        let at = body.find('한').unwrap() + 1;
-
-        assert_eq!(
-            contents(decode(&[&bytes[..at], &bytes[at..]])),
-            ["한글 커밋"]
-        );
-    }
-
-    #[test]
-    fn several_events_in_one_chunk_are_all_decoded() {
-        let body = format!("{}{}{}", delta("a"), delta("b"), delta("c"));
-        assert_eq!(contents(decode(&[body.as_bytes()])), ["a", "b", "c"]);
     }
 
     #[test]

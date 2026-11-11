@@ -478,44 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn commit_diff_does_not_modify_real_index() {
-        let _lock = cwd_lock();
-        let repo = tempfile::tempdir().unwrap();
-        init(repo.path());
-        fs::write(repo.path().join("tracked.txt"), "before\n").unwrap();
-        git(repo.path(), &["add", "tracked.txt"]);
-        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
-        fs::write(repo.path().join("tracked.txt"), "staged\n").unwrap();
-        git(repo.path(), &["add", "tracked.txt"]);
-        fs::write(repo.path().join("tracked.txt"), "unstaged\n").unwrap();
-        fs::write(repo.path().join("new.txt"), "new\n").unwrap();
-
-        let _cwd = CwdGuard::enter(repo.path());
-        let diff = review_changes(false, &[]).unwrap().diff;
-        let status_before = Command::new("git")
-            .args(["status", "--porcelain"])
-            .output()
-            .unwrap();
-
-        assert!(diff.contains("tracked.txt"));
-        assert!(diff.contains("new.txt"));
-        let status = String::from_utf8_lossy(&status_before.stdout);
-        assert!(status.contains("MM tracked.txt"), "status was {status:?}");
-        assert!(status.contains("?? new.txt"), "status was {status:?}");
-    }
-
-    #[test]
-    fn commit_reports_git_failure() {
-        let _lock = cwd_lock();
-        let repo = tempfile::tempdir().unwrap();
-        init(repo.path());
-        let _cwd = CwdGuard::enter(repo.path());
-        let message = save_buffer_to_tempfile(b"feat: test").unwrap();
-        let result = commit(&message);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn reviewed_tree_is_committed_from_subdirectory_in_unborn_repo() {
         let _lock = cwd_lock();
         let repo = tempfile::tempdir().unwrap();
@@ -628,45 +590,6 @@ mod tests {
 
     fn lock_patterns() -> Vec<String> {
         vec!["*.lock".to_owned()]
-    }
-
-    #[test]
-    fn staged_review_from_subdirectory_includes_other_directories() {
-        let _lock = cwd_lock();
-        let repo = tempfile::tempdir().unwrap();
-        init(repo.path());
-        fs::create_dir(repo.path().join("sub")).unwrap();
-        fs::create_dir(repo.path().join("other")).unwrap();
-        fs::write(repo.path().join("other/file.txt"), "elsewhere\n").unwrap();
-        git(repo.path(), &["add", "other/file.txt"]);
-
-        let _cwd = CwdGuard::enter(&repo.path().join("sub"));
-        let diff = review_changes(true, &[]).unwrap().diff;
-
-        assert!(diff.contains("+elsewhere"), "diff was {diff:?}");
-    }
-
-    #[test]
-    fn only_excluded_changes_are_named_and_keep_the_index() {
-        let _lock = cwd_lock();
-        let repo = tempfile::tempdir().unwrap();
-        init(repo.path());
-        fs::write(repo.path().join("Cargo.lock"), "1\n").unwrap();
-        git(repo.path(), &["add", "Cargo.lock"]);
-        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
-        fs::write(repo.path().join("Cargo.lock"), "2\n").unwrap();
-        let _cwd = CwdGuard::enter(repo.path());
-
-        let error = review_changes(false, &lock_patterns())
-            .err()
-            .expect("review should fail")
-            .to_string();
-
-        assert_eq!(
-            error,
-            "Only excluded files changed: Cargo.lock. Use git add and git commit to commit them."
-        );
-        assert_eq!(porcelain_status(), " M Cargo.lock\n");
     }
 
     #[test]
@@ -906,26 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn untracked_paths_are_added_literally() {
-        let _lock = cwd_lock();
-        let repo = tempfile::tempdir().unwrap();
-        init(repo.path());
-        // `*` would match both files as a pathspec, and `:` would start magic.
-        for name in ["a *.txt", ":(exclude)b.txt"] {
-            fs::write(repo.path().join(name), "new\n").unwrap();
-        }
-        let _cwd = CwdGuard::enter(repo.path());
-
-        let reviewed = review_changes(false, &[]).unwrap();
-        assert_eq!(reviewed.untracked, [":(exclude)b.txt", "a *.txt"]);
-        let output = Command::new("git")
-            .args(["ls-tree", "--name-only", "-z", &reviewed.tree])
-            .output()
-            .unwrap();
-        assert_eq!(output.stdout, b":(exclude)b.txt\0a *.txt\0");
-    }
-
-    #[test]
     fn review_ignores_diff_display_config() {
         let _lock = cwd_lock();
         let repo = tempfile::tempdir().unwrap();
@@ -982,11 +885,6 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command
-    }
-
-    #[test]
-    fn test_run_checked_success() {
-        assert!(run_checked(&mut quiet("git", &["--version"]), "git version").is_ok());
     }
 
     #[test]

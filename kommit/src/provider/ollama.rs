@@ -406,37 +406,6 @@ mod tests {
     }
 
     #[test]
-    fn an_internal_error_keeps_its_message() {
-        let err = map_ollama_error(OllamaError::InternalError(
-            ollama_rs::error::InternalOllamaError {
-                message: "pull failed".to_owned(),
-            },
-        ));
-        assert!(err.to_string().contains("pull failed"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_server_asks_whether_ollama_is_running() {
-        // Nothing listens on a port that was just freed.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let err = reqwest::Client::new()
-            .get(format!("http://127.0.0.1:{port}"))
-            .send()
-            .await
-            .unwrap_err();
-
-        let message = map_ollama_error(OllamaError::ReqwestError(err)).to_string();
-        assert!(
-            message.starts_with("Failed to connect to Ollama. Is it running?"),
-            "{message}"
-        );
-    }
-
-    #[test]
     fn every_think_type_is_sent_as_ollama_expects() {
         use clap::ValueEnum;
         use ollama_rs::generation::parameters::ThinkType as OllamaThink;

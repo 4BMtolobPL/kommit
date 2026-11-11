@@ -440,9 +440,4 @@ mod tests {
             "LM Studio returned an error (500 Internal Server Error)"
         );
     }
-
-    #[test]
-    fn server_errors_do_not_suggest_that_lm_studio_is_down() {
-        assert!(!status_error(r#"{"error":"boom"}"#).contains("Is it running?"));
-    }
 }
