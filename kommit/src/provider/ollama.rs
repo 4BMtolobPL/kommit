@@ -25,7 +25,7 @@ pub(crate) struct OllamaClient {
 impl OllamaClient {
     pub(crate) fn new(host: Url, port: u16) -> anyhow::Result<Self> {
         Ok(Self {
-            client: Ollama::new(host, port),
+            client: Ollama::builder().host(host).port(port).build(),
             ready_models: Mutex::default(),
         })
     }

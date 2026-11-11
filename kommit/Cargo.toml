@@ -14,7 +14,7 @@ async-trait = "0.1"
 clap = { version = "4.6.0", features = ["derive"] }
 futures = "0.3"
 lms-api = { version = "0.1", path = "../lms-api", features = ["stream"]}
-ollama-rs = { version = "0.3", features = ["stream"] }
+ollama-rs = { version = "0.3.6", features = ["stream"] }
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 tokio = { version = "1", features = ["full"] }
 toml = "1.1.2"
