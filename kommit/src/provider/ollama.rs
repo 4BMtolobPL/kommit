@@ -353,6 +353,75 @@ mod tests {
             .models
     }
 
+    fn server_error(message: &str) -> OllamaError {
+        OllamaError::Other(serde_json::json!({ "error": message }).to_string())
+    }
+
+    #[test]
+    fn the_server_naming_the_model_as_not_found_means_not_installed() {
+        assert!(is_model_not_found_error(
+            &server_error("model 'gemma4' not found"),
+            "gemma4"
+        ));
+        // The server may name the model with the tag it resolved.
+        assert!(is_model_not_found_error(
+            &server_error("model 'gemma4:latest' not found"),
+            "gemma4"
+        ));
+    }
+
+    #[test]
+    fn other_failures_do_not_mean_not_installed() {
+        assert!(!is_model_not_found_error(
+            &server_error("model 'llama3' not found"),
+            "gemma4"
+        ));
+        assert!(!is_model_not_found_error(
+            &server_error("out of memory loading gemma4"),
+            "gemma4"
+        ));
+        // Not the JSON error body the server sends.
+        assert!(!is_model_not_found_error(
+            &OllamaError::Other("model 'gemma4' not found".to_owned()),
+            "gemma4"
+        ));
+        assert!(!is_model_not_found_error(
+            &OllamaError::InternalError(ollama_rs::error::InternalOllamaError {
+                message: "model 'gemma4' not found".to_owned(),
+            }),
+            "gemma4"
+        ));
+    }
+
+    #[test]
+    fn a_json_error_body_is_shown_as_its_message() {
+        let err = map_ollama_error(server_error("model requires more system memory"));
+        assert_eq!(err.to_string(), "model requires more system memory");
+    }
+
+    #[test]
+    fn a_plain_error_body_is_shown_as_sent() {
+        let err = map_ollama_error(OllamaError::Other("502 Bad Gateway".to_owned()));
+        assert_eq!(err.to_string(), "502 Bad Gateway");
+    }
+
+    #[test]
+    fn every_think_type_is_sent_as_ollama_expects() {
+        use clap::ValueEnum;
+        use ollama_rs::generation::parameters::ThinkType as OllamaThink;
+
+        for think in ThinkType::value_variants() {
+            let sent = serde_json::to_value(OllamaThink::from(think.clone())).unwrap();
+            let expected = match think {
+                ThinkType::True => serde_json::json!(true),
+                ThinkType::False => serde_json::json!(false),
+                // The levels are sent by the same name as on the command line.
+                level => serde_json::json!(level.to_string()),
+            };
+            assert_eq!(sent, expected, "{think}");
+        }
+    }
+
     #[test]
     fn a_name_without_a_tag_gets_latest() {
         assert_eq!(with_default_tag("gemma4"), "gemma4:latest");

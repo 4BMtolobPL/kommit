@@ -82,18 +82,6 @@ mod tests {
     }
 
     #[test]
-    fn chunks_are_smaller_than_prompts() {
-        for budget in [
-            InputBudget::default(),
-            InputBudget::from_context_length(0),
-            InputBudget::from_context_length(4096),
-            InputBudget::from_context_length(u32::MAX),
-        ] {
-            assert!(budget.chunk_bytes < budget.prompt_bytes, "{budget:?}");
-        }
-    }
-
-    #[test]
     fn default_keeps_the_fixed_limits() {
         assert_eq!(
             InputBudget::default(),

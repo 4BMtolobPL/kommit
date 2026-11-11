@@ -88,6 +88,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::ValueEnum;
 
     fn load_str(content: &str) -> (tempfile::TempDir, PathBuf, anyhow::Result<Config>) {
         let dir = tempfile::tempdir().unwrap();
@@ -134,6 +135,89 @@ mod tests {
         let (_dir, _path, result) = load_str("modle = \"x\"\n");
         let message = format!("{:#}", result.unwrap_err());
         assert!(message.contains("modle"), "message was {message}");
+    }
+
+    /// Writes `config` the way `save` does and loads it back.
+    fn round_trip(config: &Config) -> (String, Config) {
+        let content = toml::to_string_pretty(config).unwrap();
+        let (_dir, _path, result) = load_str(&content);
+        (content, result.unwrap())
+    }
+
+    /// The name of `value` on the command line, which the config file must use too.
+    fn cli_name(value: &impl ValueEnum) -> String {
+        value.to_possible_value().unwrap().get_name().to_owned()
+    }
+
+    #[test]
+    fn every_provider_is_saved_by_its_cli_name_and_loaded_back() {
+        for provider in LlmProvider::value_variants() {
+            let config = Config {
+                provider: Some(provider.clone()),
+                ..Config::default()
+            };
+            let (content, loaded) = round_trip(&config);
+            assert_eq!(
+                content.trim(),
+                format!("provider = \"{}\"", cli_name(provider))
+            );
+            assert_eq!(
+                loaded.provider.as_ref().map(cli_name),
+                Some(cli_name(provider))
+            );
+        }
+    }
+
+    #[test]
+    fn every_think_type_is_saved_by_its_cli_name_and_loaded_back() {
+        for think in ThinkType::value_variants() {
+            let config = Config {
+                think: Some(think.clone()),
+                ..Config::default()
+            };
+            let (content, loaded) = round_trip(&config);
+            assert_eq!(content.trim(), format!("think = \"{think}\""));
+            assert_eq!(loaded.think.as_ref().map(cli_name), Some(cli_name(think)));
+        }
+    }
+
+    #[test]
+    fn every_lang_is_saved_by_its_cli_name_and_loaded_back() {
+        for lang in ResponseLang::value_variants() {
+            let config = Config {
+                lang: Some(lang.clone()),
+                ..Config::default()
+            };
+            let (content, loaded) = round_trip(&config);
+            assert_eq!(content.trim(), format!("lang = \"{lang}\""));
+            assert_eq!(loaded.lang.as_ref().map(cli_name), Some(cli_name(lang)));
+        }
+    }
+
+    #[test]
+    fn lmstudio_without_a_dash_is_loaded_as_lm_studio() {
+        let (_dir, _path, result) = load_str("provider = \"lmstudio\"\n");
+        assert!(matches!(
+            result.unwrap().provider,
+            Some(LlmProvider::LmStudio)
+        ));
+    }
+
+    #[test]
+    fn a_full_config_survives_a_round_trip() {
+        let config = Config {
+            model: Some("llama".to_string()),
+            lang: Some(ResponseLang::Ko),
+            provider: Some(LlmProvider::LmStudio),
+            stream: Some(true),
+            think: Some(ThinkType::High),
+            host: Some("http://example.com:8080".to_string()),
+            port: Some(8080),
+            context_length: Some(8192),
+            exclude_patterns: Some(vec!["*.min.js".to_string(), "dist/*".to_string()]),
+        };
+        let (content, loaded) = round_trip(&config);
+        assert_eq!(toml::to_string_pretty(&loaded).unwrap(), content);
     }
 
     #[test]

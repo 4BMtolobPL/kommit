@@ -94,3 +94,97 @@ fn test_invalid_host_keeps_its_cause() {
     assert!(matches!(err, lms_api::Error::Host(_)), "{err:?}");
     assert!(std::error::Error::source(&err).is_some());
 }
+
+#[tokio::test]
+async fn test_chat_returns_the_response() {
+    use lms_api::chat::request::ChatRequestBuilder;
+    use lms_api::chat::response::Output;
+    use mockito::Matcher;
+
+    let mut server = Server::new_async().await;
+    let url = server.url();
+
+    let _m = server
+        .mock("POST", "/api/v1/chat")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "test-model",
+            "input": "hi",
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"model_instance_id":"test-model","output":[{"type":"reasoning","content":"thinking"},{"type":"message","content":"feat: add tests"}],"stats":{"input_tokens":3,"total_output_tokens":5,"reasoning_output_tokens":1,"tokens_per_second":10.5,"time_to_first_token_seconds":0.1},"response_id":"resp_1"}"#,
+        )
+        .create_async()
+        .await;
+
+    let client = LmStudio::from_url(Url::parse(&url).unwrap());
+    let request = ChatRequestBuilder::default()
+        .model("test-model")
+        .input("hi")
+        .build()
+        .unwrap();
+    let response = client.chat(request).await.unwrap();
+
+    assert_eq!(response.model_instance_id, "test-model");
+    assert_eq!(response.response_id.as_deref(), Some("resp_1"));
+    assert!(response.stats.model_load_time_seconds.is_none());
+    match &response.output[..] {
+        [
+            Output::Reasoning { content: reasoning },
+            Output::Message { content: message },
+        ] => {
+            assert_eq!(reasoning, "thinking");
+            assert_eq!(message, "feat: add tests");
+        }
+        other => panic!("unexpected output {other:?}"),
+    }
+}
+
+#[cfg(feature = "stream")]
+#[tokio::test]
+async fn test_chat_stream_yields_deltas_until_done() {
+    use lms_api::chat::request::ChatRequestBuilder;
+    use lms_api::chat::stream::response::StreamEvent;
+    use mockito::Matcher;
+    use tokio_stream::StreamExt;
+
+    let mut server = Server::new_async().await;
+    let url = server.url();
+
+    let _m = server
+        .mock("POST", "/api/v1/chat")
+        .match_body(Matcher::PartialJson(serde_json::json!({ "stream": true })))
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(concat!(
+            "event: message.delta\n",
+            r#"data: {"type":"message.delta","content":"feat: "}"#,
+            "\n\n",
+            "event: message.delta\n",
+            r#"data: {"type":"message.delta","content":"한글"}"#,
+            "\n\n",
+            "data: [DONE]\n\n",
+            r#"data: {"type":"message.delta","content":"ignored"}"#,
+            "\n\n",
+        ))
+        .create_async()
+        .await;
+
+    let client = LmStudio::from_url(Url::parse(&url).unwrap());
+    let request = ChatRequestBuilder::default()
+        .model("test-model")
+        .input("hi")
+        .build()
+        .unwrap();
+    let events: Vec<_> = client.chat_stream(request).await.unwrap().collect().await;
+
+    let contents: Vec<_> = events
+        .into_iter()
+        .map(|event| match event {
+            Ok(StreamEvent::MessageDelta { content }) => content,
+            other => panic!("expected a message delta, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(contents, ["feat: ", "한글"]);
+}
