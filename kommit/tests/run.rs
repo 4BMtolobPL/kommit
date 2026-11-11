@@ -650,7 +650,7 @@ impl TestRepo {
 
     /// Stages `tracked.txt`, then leaves a different unstaged edit and a new file.
     /// Changes two files by about 9 KB each, so that the diff takes the 2-step path with
-    /// one summary per file but no chunk is truncated.
+    /// one summary per file, as two do not fit one chunk, but no chunk is truncated.
     fn make_large_diff(&self) {
         let content = format!("{}\n", "x".repeat(80)).repeat(110);
         self.write("tracked.txt", &content);
@@ -1350,16 +1350,79 @@ fn large_diff_is_split_per_file_despite_color_config() {
     }
 }
 
-/// Many files make each summary short, in proportion to how many there are.
-/// Summaries that still overflow the prompt stop the run before the final request.
+/// Writes `count` new files of about 800 bytes each, about 19 KB of diff in total: too
+/// much for one prompt, but enough for only two chunks of the default budget.
+fn write_small_files(repo: &TestRepo, count: usize) {
+    let content = format!("{}\n", "y".repeat(80)).repeat(10);
+    for i in 0..count {
+        repo.write(&format!("file_{i}.txt"), &content);
+    }
+}
+
+/// Small files share a chunk, instead of taking one summary request each.
+#[test]
+fn small_files_are_summarized_together() {
+    let repo = TestRepo::with_commit();
+    write_small_files(&repo, 20);
+
+    let output = repo.kommit(&["--yes"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stderr.contains("chunk 2/2"), "stderr was {stderr}");
+    let prompts = repo.ollama.prompts();
+    assert_eq!(summary_prompts(&prompts), 2, "prompts were {prompts:?}");
+    for i in 0..20 {
+        let file = format!("b/file_{i}.txt");
+        assert!(
+            prompts.iter().any(|prompt| prompt.contains(&file)),
+            "{file} was not summarized"
+        );
+    }
+}
+
+/// A file too large for one chunk is split between its hunks, so that its end still
+/// reaches a summary instead of being cut off.
+#[test]
+fn a_large_file_is_summarized_to_its_end() {
+    let repo = TestRepo::with_commit();
+    let lines = |changed: &str| {
+        (0..600)
+            .map(|i| {
+                let fill = if i % 20 == 10 { changed } else { "a" };
+                format!("{i} {}\n", fill.repeat(80))
+            })
+            .collect::<String>()
+    };
+    repo.write("large.txt", &lines("a"));
+    repo.git(&["add", "large.txt"]);
+    repo.git(&["commit", "--quiet", "-m", "large"]);
+    repo.write("large.txt", &lines("b"));
+
+    let output = repo.kommit(&[]);
+
+    assert!(output.status.success(), "{output:?}");
+    let prompts = repo.ollama.prompts();
+    assert!(summary_prompts(&prompts) > 1, "prompts were {prompts:?}");
+    let last_change = format!("+590 {}", "b".repeat(80));
+    assert!(
+        prompts.iter().any(|prompt| prompt.contains(&last_change)),
+        "the last change was not summarized"
+    );
+    for prompt in &prompts {
+        assert!(
+            !prompt.contains("truncated due to size"),
+            "prompt was {prompt}"
+        );
+    }
+}
+
+/// Summaries that overflow the prompt stop the run before the final request.
 #[test]
 fn summaries_too_large_for_one_prompt_stop_before_the_final_request() {
     let repo = TestRepo::with_commit();
-    let content = format!("{}\n", "y".repeat(80)).repeat(10);
-    for i in 0..20 {
-        repo.write(&format!("file_{i}.txt"), &content);
-    }
-    repo.ollama.respond_with(&"- a long summary\n".repeat(60));
+    write_small_files(&repo, 20);
+    repo.ollama.respond_with(&"- a long summary\n".repeat(500));
 
     let output = repo.kommit(&["--yes"]);
 
@@ -1372,10 +1435,10 @@ fn summaries_too_large_for_one_prompt_stop_before_the_final_request() {
     assert!(stderr.contains("--staged"), "stderr was {stderr}");
     assert!(output.stdout.is_empty(), "{output:?}");
     let prompts = repo.ollama.prompts();
-    assert_eq!(prompts.len(), 20, "only summaries were requested");
+    assert_eq!(prompts.len(), 2, "only summaries were requested");
     for prompt in &prompts {
         assert!(
-            prompt.contains("under about 750 characters"),
+            prompt.contains("under about 1500 characters"),
             "prompt was {prompt}"
         );
     }
