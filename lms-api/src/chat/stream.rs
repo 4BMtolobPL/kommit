@@ -29,53 +29,220 @@ impl LmStudio {
         }
 
         let s = stream! {
-            let mut buffer = Vec::new();
+            let mut decoder = SseDecoder::default();
             let mut stream = res.bytes_stream();
 
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
-                        buffer.extend_from_slice(&chunk);
-
-                        while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
-                            let line_bytes = buffer[..pos].to_vec();
-                            buffer.drain(..pos + 1);
-
-                            let line = String::from_utf8_lossy(&line_bytes);
-                            let line = line.trim();
-
-                            if line.is_empty() {
-                                continue;
-                            }
-
-                            if let Some(ev) = line.strip_prefix("event:") {
-                                debug!(event = %ev.trim(), "SSE event type");
-                            } else if let Some(data) = line.strip_prefix("data:") {
-                                let data = data.trim();
-                                if data == "[DONE]" {
-                                    return;
-                                }
-
-                                match serde_json::from_str::<StreamEvent>(data) {
-                                    Ok(response) => yield Ok(response),
-                                    Err(e) => {
-                                        error!(error = %e, data = %data, "Failed to deserialize response");
-                                        yield Err(Error::Decode(e));
-                                    }
-                                }
-                            }
+                        for event in decoder.feed(&chunk) {
+                            yield event;
+                        }
+                        if decoder.is_done() {
+                            return;
                         }
                     }
                     Err(e) => {
                         error!(error = %e, "Failed to read response");
                         yield Err(Error::Http(e));
-                        break;
+                        return;
                     }
                 }
+            }
+
+            for event in decoder.finish() {
+                yield event;
             }
         };
 
         Ok(Box::pin(s))
+    }
+}
+
+/// Turns the bytes of a server-sent event stream into events, however the bytes
+/// are split into chunks.
+#[derive(Default)]
+struct SseDecoder {
+    /// Bytes of a line that has not ended yet.
+    buffer: Vec<u8>,
+    /// Whether `data: [DONE]` was seen; everything after it is ignored.
+    done: bool,
+}
+
+impl SseDecoder {
+    /// Decodes every line `chunk` completes.
+    fn feed(&mut self, chunk: &[u8]) -> Vec<Result<StreamEvent>> {
+        self.buffer.extend_from_slice(chunk);
+        let mut events = Vec::new();
+        while !self.done {
+            let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') else {
+                break;
+            };
+            let line: Vec<u8> = self.buffer.drain(..=pos).collect();
+            self.decode_line(&line[..pos], &mut events);
+        }
+        events
+    }
+
+    /// Decodes the last line, which the stream may end without a newline.
+    fn finish(&mut self) -> Vec<Result<StreamEvent>> {
+        let line = std::mem::take(&mut self.buffer);
+        let mut events = Vec::new();
+        if !self.done {
+            self.decode_line(&line, &mut events);
+        }
+        events
+    }
+
+    fn is_done(&self) -> bool {
+        self.done
+    }
+
+    fn decode_line(&mut self, line: &[u8], events: &mut Vec<Result<StreamEvent>>) {
+        let line = String::from_utf8_lossy(line);
+        let line = line.trim();
+
+        if let Some(ev) = line.strip_prefix("event:") {
+            debug!(event = %ev.trim(), "SSE event type");
+        } else if let Some(data) = line.strip_prefix("data:") {
+            let data = data.trim();
+            if data == "[DONE]" {
+                self.done = true;
+                return;
+            }
+
+            match serde_json::from_str::<StreamEvent>(data) {
+                Ok(response) => events.push(Ok(response)),
+                Err(e) => {
+                    error!(error = %e, data = %data, "Failed to deserialize response");
+                    events.push(Err(Error::Decode(e)));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const START: &str = r#"data: {"type":"message.start"}"#;
+
+    /// Feeds `chunks` in order, then ends the stream.
+    fn decode(chunks: &[&[u8]]) -> Vec<Result<StreamEvent>> {
+        let mut decoder = SseDecoder::default();
+        let mut events = Vec::new();
+        for chunk in chunks {
+            events.extend(decoder.feed(chunk));
+        }
+        events.extend(decoder.finish());
+        events
+    }
+
+    fn delta(content: &str) -> String {
+        format!(
+            "event: message.delta\ndata: {}\n\n",
+            serde_json::json!({ "type": "message.delta", "content": content })
+        )
+    }
+
+    fn contents(events: Vec<Result<StreamEvent>>) -> Vec<String> {
+        events
+            .into_iter()
+            .map(|event| match event {
+                Ok(StreamEvent::MessageDelta { content }) => content,
+                other => panic!("expected a message delta, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_line_split_across_chunks_is_decoded_once_whole() {
+        let body = delta("hello");
+        let (first, second) = body.split_at(20);
+
+        let mut decoder = SseDecoder::default();
+        assert!(decoder.feed(first.as_bytes()).is_empty());
+        assert_eq!(contents(decoder.feed(second.as_bytes())), ["hello"]);
+    }
+
+    #[test]
+    fn every_split_point_gives_the_same_events() {
+        let body = format!("{}{}", delta("one"), delta("two"));
+        for at in 0..=body.len() {
+            let (first, second) = body.as_bytes().split_at(at);
+            assert_eq!(
+                contents(decode(&[first, second])),
+                ["one", "two"],
+                "split at {at}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_multibyte_character_split_across_chunks_is_kept() {
+        let body = delta("한글 커밋");
+        let bytes = body.as_bytes();
+        // Split inside the three-byte encoding of '한'.
+        let at = body.find('한').unwrap() + 1;
+
+        assert_eq!(
+            contents(decode(&[&bytes[..at], &bytes[at..]])),
+            ["한글 커밋"]
+        );
+    }
+
+    #[test]
+    fn several_events_in_one_chunk_are_all_decoded() {
+        let body = format!("{}{}{}", delta("a"), delta("b"), delta("c"));
+        assert_eq!(contents(decode(&[body.as_bytes()])), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn crlf_line_endings_are_decoded() {
+        let body = delta("crlf").replace('\n', "\r\n");
+        assert_eq!(contents(decode(&[body.as_bytes()])), ["crlf"]);
+    }
+
+    #[test]
+    fn done_ends_the_stream() {
+        let body = format!("{}data: [DONE]\n\n{}", delta("before"), delta("after"));
+
+        let mut decoder = SseDecoder::default();
+        assert_eq!(contents(decoder.feed(body.as_bytes())), ["before"]);
+        assert!(decoder.is_done());
+        assert!(decoder.feed(delta("later").as_bytes()).is_empty());
+        assert!(decoder.finish().is_empty());
+    }
+
+    #[test]
+    fn invalid_data_is_an_error_and_decoding_continues() {
+        let body = format!("data: {{not json\n\n{}", delta("next"));
+        let events = decode(&[body.as_bytes()]);
+
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(matches!(events[0], Err(Error::Decode(_))), "{events:?}");
+        assert!(
+            matches!(events[1], Ok(StreamEvent::MessageDelta { ref content }) if content == "next")
+        );
+    }
+
+    #[test]
+    fn a_last_line_without_a_newline_is_decoded_when_the_stream_ends() {
+        let mut decoder = SseDecoder::default();
+        assert!(decoder.feed(START.as_bytes()).is_empty());
+
+        let events = decoder.finish();
+        assert!(
+            matches!(events[..], [Ok(StreamEvent::MessageStart)]),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn lines_other_than_data_make_no_events() {
+        let body = "\n\nevent: message.start\n: a comment\nid: 1\n\n";
+        assert!(decode(&[body.as_bytes()]).is_empty());
     }
 }
 
