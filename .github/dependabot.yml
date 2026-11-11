@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Only bump the SHA-pinned third-party actions. release.yml is generated
+    # by dist and must not be edited by hand, so its GitHub-owned actions are
+    # left to `dist generate`.
+    allow:
+      - dependency-name: dtolnay/rust-toolchain
+      - dependency-name: Swatinem/rust-cache
+    commit-message:
+      prefix: ci
